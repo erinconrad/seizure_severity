@@ -1,5 +1,5 @@
 %% ===== Config =====
-mainDir  = '../data/SN_examples/';   % <- set this to your top-level folder
+mainDir  = '/mnt/sauce/littlab/users/erinconr/projects/routine_eeg/output/spikenet/';   % <- set this to your top-level folder
 outCsv   = '../data/SN_counts/spike_counts_summary.csv';
 
 THRESHOLD = 0.43;
