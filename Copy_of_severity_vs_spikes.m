@@ -50,7 +50,7 @@ fprintf('Patients excluded by epilepsy_type: %d\n', sum(isBad));
 % Keep only rows in R belonging to valid patients
 R = R(ismember(R.patient_id, validPatients), :);
 
-%% ===== Compute per-patient mean sz_freq with rescue from visit_hasSz =====
+%% ===== Compute per-patient mean sz_freq among VALID patients only =====
 pids = unique(R.patient_id(~isnan(R.patient_id)));
 MeanSzFreq = nan(numel(pids),1);
 
@@ -59,7 +59,6 @@ for k = 1:numel(pids)
     rows = R.patient_id == pid;
     vals = [];
     rr = R(rows,:);
-
     for j = 1:height(rr)
         raw = strtrim(rr.sz_freqs(j));
         if strlength(raw)==0 || raw=="[]" || raw==""
@@ -76,54 +75,13 @@ for k = 1:numel(pids)
             end
         end
     end
-
-    % ---- Rescue rule: use visit_hasSz if sz_freq missing ----
-    if isempty(vals) || all(isnan(vals))
-        if ismember('visit_hasSz', R.Properties.VariableNames)
-            rawHas = string(rr.visit_hasSz);
-            allVals = [];
-            for jj = 1:numel(rawHas)
-                sHas = strtrim(rawHas(jj));
-                if strlength(sHas)==0 || sHas=="[]" || sHas==""
-                    continue
-                end
-                try
-                    vHas = jsondecode(char(sHas));
-                    allVals = [allVals; vHas(:)]; %#ok<AGROW>
-                catch
-                    nums = regexp(sHas, '\d+', 'match');
-                    if ~isempty(nums)
-                        allVals = [allVals; str2double(string(nums))]; %#ok<AGROW>
-                    end
-                end
-            end
-            % if we found any hasSz entries and *all* are 0, assume seizure frequency = 0
-            if ~isempty(allVals) && all(allVals==0)
-                vals = 0;  % rescue as 0 seizures
-            end
-      
-        end
-    end
-
     MeanSzFreq(k) = mean(vals,'omitnan');
 end
 
 Rg = table(pids, MeanSzFreq, 'VariableNames', {'Patient','MeanSzFreq'});
 
-%% Attach EpilepsyType to per-patient sz-freq table
-% Rg has columns: Patient, MeanSzFreq
-% PerPatType has columns: Patient, EpilepsyType (built earlier)
+% Attach epilepsy_type to Rg for reference
 Rg = innerjoin(Rg, PerPatType(~isBad, :), 'Keys','Patient');
-
-%% ===== Join per-patient tables (now only valid epilepsy_type patients remain) =====
-P = innerjoin(Sg, Rg, 'Keys','Patient');
-
-% (optional) make sure EpilepsyType is string/categorical
-if ~isstring(P.EpilepsyType), P.EpilepsyType = string(P.EpilepsyType); end
-% drop rows with missing values
-P = P(~isnan(P.MeanSzFreq) & ~isnan(P.MeanSpikeRate_perHour), :);
-
-
 
 %% ===== Join per-patient tables (now only valid epilepsy_type patients remain) =====
 P = innerjoin(Sg, Rg, 'Keys','Patient');
@@ -237,4 +195,3 @@ fprintf('Patients with both EEG and report entries: %d\n', nBoth);
 noSzFreq = sum(isnan(Rg.MeanSzFreq));
 noSpike  = sum(isnan(Sg.MeanSpikeRate_perHour));
 fprintf('Patients missing sz freq: %d, missing spike rate: %d\n', noSzFreq, noSpike);
-
