@@ -14,6 +14,10 @@ f1 = dir(fullfile(mainDir, 'sub-Penn*', 'ses-*', 'sub-Penn*_ses-*_task-EEG_eeg_*
 f2 = dir(fullfile(mainDir, 'sub-Penn*', 'ses-*', 'sub-Penn*_ses-*_combined_*.csv'));
 filesAll = [f1; f2];
 
+% If you prefer to catch *any* candidate CSV under ses-* (use with care):
+% f3 = dir(fullfile(mainDir, 'sub-Penn*', 'ses-*', '*.csv'));
+% filesAll = [filesAll; f3];
+
 if isempty(filesAll)
     fprintf('No CSVs found under: %s\n', mainDir);
 end
@@ -22,17 +26,8 @@ filePaths = string(fullfile({filesAll.folder}, {filesAll.name}));
 files = filesAll(uniqIdx);
 
 %% ===== Schema =====
-varNames = { ...
-    'EEG_Name','Patient','Session', ...
-    'Total_Spikes','Left_Spikes','Right_Spikes','Duration_sec','Longest_Spike_Duration_sec', ...
-    'FirstRun_Spikes','FirstRun_Left_Spikes','FirstRun_Right_Spikes','FirstRun_Duration_sec', ...
-    'First24Runs_Spikes','First24Runs_Left_Spikes','First24Runs_Right_Spikes','First24Runs_Duration_sec' ...
-    };
-varTypes = {'string','double','double', ...
-    'double','double','double','double','double', ...
-    'double','double','double','double', ...
-    'double','double','double','double'};
-
+varNames = {'EEG_Name','Patient','Session','Total_Spikes','Left_Spikes','Right_Spikes','Duration_sec','Longest_Spike_Duration_sec'};
+varTypes = {'string','double','double','double','double','double','double','double'};
 Summary  = table('Size',[0 numel(varNames)], 'VariableTypes', varTypes, 'VariableNames', varNames);
 
 %% ===== Load existing (and build donePairs by Patient-Session) =====
@@ -87,12 +82,14 @@ for k = 1:numel(files)
     fname  = files(k).name;
 
     % --- Parse Patient/Session robustly from the PATH ---
+    % Matches: .../sub-Penn1147/.../ses-2/...
     tok = regexp(fpath, 'sub-Penn(\d+).+?ses-(\d+)', 'tokens', 'once');
     patientNum = NaN; sessionNum = NaN;
     if ~isempty(tok)
         patientNum = str2double(tok{1});
         sessionNum = str2double(tok{2});
     else
+        % Fallback to filename pattern (older style)
         tok2 = regexp(fname, 'sub-Penn(\d+)_ses-(\d+)', 'tokens', 'once');
         if ~isempty(tok2)
             patientNum = str2double(tok2{1});
@@ -139,7 +136,7 @@ for k = 1:numel(files)
     N = numel(SN2);
     duration_sec = N / FS;
 
-    % ===== Longest continuous above-threshold duration (whole file) =====
+    % ===== Longest continuous above-threshold duration =====
     mask = SN2 > THRESHOLD;
     if any(mask)
         d = diff([false; mask; false]);   % rising/falling edges
@@ -151,81 +148,39 @@ for k = 1:numel(files)
         longest_run_sec = 0;
     end
 
-    % ===== Whole-file clustered detections (existing behavior) =====
-    [totalCount, leftCount, rightCount] = count_spikes_segment(SN2, ZR, ZL, 1:N, THRESHOLD, WIN_SAMP);
+    % ===== Cluster detections =====
+    i = max(1, HALF_WIN + 1);
+    totalCount = 0; leftCount = 0; rightCount = 0;
 
-    % ===== Identify a run/record column if present =====
-    runVar = "";
-    candidates = {'run','Run','RUN','run_idx','run_index','RunIndex','record','Record','REC','run_number','RunNumber'};
-    for c = 1:numel(candidates)
-        if ismember(candidates{c}, T.Properties.VariableNames)
-            runVar = candidates{c};
-            break
-        end
-    end
+    while i <= N
+        if SN2(i) > THRESHOLD
+            wStart = max(1, i - HALF_WIN);
+            wEnd   = min(N, i + HALF_WIN);
 
-    % ===== First-run + First-24-runs metrics =====
-    firstRun_total = totalCount; firstRun_L = leftCount; firstRun_R = rightCount; firstRun_dur = duration_sec;
-    first24_total  = totalCount; first24_L  = leftCount; first24_R  = rightCount; first24_dur  = duration_sec;
+            maxZR = max(ZR(wStart:wEnd));
+            maxZL = max(ZL(wStart:wEnd));
 
-    if runVar ~= ""
-        runNums = double(T.(runVar)(:));
-        % Sanitize run numbers: require finite
-        runNums(~isfinite(runNums)) = nan;
-
-        % Unique runs in file order
-        [uniqRuns, ~, ~] = unique(runNums, 'stable');
-        uniqRuns = uniqRuns(isfinite(uniqRuns));
-
-        if ~isempty(uniqRuns)
-            % ----- First run only -----
-            r1 = uniqRuns(1);
-            idxFirst = find(runNums == r1);
-            [firstRun_total, firstRun_L, firstRun_R] = count_spikes_segment(SN2, ZR, ZL, idxFirst, THRESHOLD, WIN_SAMP);
-            firstRun_dur = numel(idxFirst) / FS;
-
-            % ----- First 24 runs (or entire file if <24 runs, per request) -----
-            if numel(uniqRuns) >= 24
-                takeRuns = uniqRuns(1:24);
-                % Sum over runs, respecting run boundaries (don’t let the skip window cross runs)
-                first24_total = 0; first24_L = 0; first24_R = 0; first24_dur = 0;
-                for r = 1:numel(takeRuns)
-                    idxr = find(runNums == takeRuns(r));
-                    [t_, L_, R_] = count_spikes_segment(SN2, ZR, ZL, idxr, THRESHOLD, WIN_SAMP);
-                    first24_total = first24_total + t_;
-                    first24_L     = first24_L + L_;
-                    first24_R     = first24_R + R_;
-                    first24_dur   = first24_dur + numel(idxr)/FS;
-                end
+            if maxZR > maxZL
+                leftCount  = leftCount + 1;
             else
-                % Fewer than 24 runs => use *full-file* stats
-                first24_total = totalCount;
-                first24_L     = leftCount;
-                first24_R     = rightCount;
-                first24_dur   = duration_sec;
+                rightCount = rightCount + 1;
             end
+            totalCount = totalCount + 1;
+            i = i + WIN_SAMP;   % skip ahead
+        else
+            i = i + 1;
         end
     end
 
     % ===== Append summary row =====
-    newRow = { ...
-        string(fname), patientNum, sessionNum, ...
-        totalCount, leftCount, rightCount, duration_sec, longest_run_sec, ...
-        firstRun_total, firstRun_L, firstRun_R, firstRun_dur, ...
-        first24_total, first24_L, first24_R, first24_dur ...
-        };
+    newRow = {string(fname), patientNum, sessionNum, totalCount, leftCount, rightCount, duration_sec, longest_run_sec};
     Summary = [Summary; cell2table(newRow, 'VariableNames', varNames)]; %#ok<AGROW>
 
     % Track the pair as done so duplicates in the same run are skipped
     donePairs = [donePairs; pairKey]; %#ok<AGROW>
 
-    fprintf(['Processed (Patient=%g, Session=%g) %-40s  total=%4d  L=%4d  R=%4d  dur=%.1fs  longest=%.3fs  | ' ...
-             '1stRun: total=%4d L=%4d R=%4d dur=%.1fs  | ' ...
-             '1st24: total=%4d L=%4d R=%4d dur=%.1fs\n'], ...
-        patientNum, sessionNum, fname, ...
-        totalCount, leftCount, rightCount, duration_sec, longest_run_sec, ...
-        firstRun_total, firstRun_L, firstRun_R, firstRun_dur, ...
-        first24_total, first24_L, first24_R, first24_dur);
+    fprintf('Processed (Patient=%g, Session=%g) %-40s  total=%4d  L=%4d  R=%4d  dur=%.1fs  longest=%.3fs\n', ...
+        patientNum, sessionNum, fname, totalCount, leftCount, rightCount, duration_sec, longest_run_sec);
 end
 
 %% ===== Optional: sort for readability =====
@@ -240,40 +195,3 @@ end
 %% ===== Save summary =====
 writetable(Summary, outCsv);
 fprintf('Saved summary to: %s  (rows=%d)\n', outCsv, height(Summary));
-
-%% ===== Local function =====
-function [totalCount, leftCount, rightCount] = count_spikes_segment(SN2, ZR, ZL, idxs, THRESHOLD, WIN_SAMP)
-% Count clustered detections within an index subset (idxs).
-% This applies the same 1-second skip rule, restricted to the provided indices.
-    totalCount = 0; leftCount = 0; rightCount = 0;
-    if isempty(idxs); return; end
-
-    % Work in the local index space
-    sn = SN2(idxs);
-    zr = ZR(idxs);
-    zl = ZL(idxs);
-
-    Nloc = numel(sn);
-    i = 1;
-    half_win = floor(WIN_SAMP/2);
-
-    while i <= Nloc
-        if sn(i) > THRESHOLD
-            wStart = max(1, i - half_win);
-            wEnd   = min(Nloc, i + half_win);
-
-            maxZR = max(zr(wStart:wEnd));
-            maxZL = max(zl(wStart:wEnd));
-
-            if maxZR > maxZL
-                leftCount  = leftCount + 1;
-            else
-                rightCount = rightCount + 1;
-            end
-            totalCount = totalCount + 1;
-            i = i + WIN_SAMP;  % skip ahead within this segment
-        else
-            i = i + 1;
-        end
-    end
-end

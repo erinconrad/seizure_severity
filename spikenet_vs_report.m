@@ -1,12 +1,21 @@
+%% Parameters
+only_ambulatories = 1; % 1 = only amb, 2 = only routine, 0 = all
+
 %% ===== Paths you gave =====
 outCsv     = '../data/SN_counts/spike_counts_summary.csv';   % from previous step
-reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-10-07_1611.csv';
+reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-08_0557.csv';
 
 % Column in the report that encodes present/absent (string or categorical)
 reportColName = 'report_SPORADIC_EPILEPTIFORM_DISCHARGES';
 
 %% ===== Load spike-count summary =====
 S = readtable(outCsv, 'TextType','string');
+
+if only_ambulatories == 1
+    S(S.Duration_sec < 3600*12,:) = [];
+elseif only_ambulatories == 2
+    S(S.Duration_sec > 3600*12,:) = [];
+end
 
 % If multiple CSVs exist per (Patient, Session), aggregate to one row per pair
 Sgrp = groupsummary(S, {'Patient','Session'}, 'sum', ...

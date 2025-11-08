@@ -5,7 +5,9 @@
 %    B) Frontal — r, p_bonf    C) Temporal — r, p_bonf    D) General — r, p_bonf
 %  Style: log–log scatter, dotted zero guides, zero-origin stars (same color)
 %  ------------------------------------------------------------
-clear; clc;
+%clear; clc;
+
+only_amb = 0; % 1 = ONLY ALLOW AMBULATORIES; 2 = No ambulatories; 0 = everything
 
 %% ===== Paths (EDIT) =====
 outCsv     = '../data/SN_counts/spike_counts_summary.csv';
@@ -17,6 +19,12 @@ resultsCsv = '../output/spearman_spikerate_szfreq_results.csv';   % [] to skip s
 S = readtable(outCsv,'TextType','string');
 S.SpikeRate_Hz      = S.Total_Spikes ./ S.Duration_sec;
 S.SpikeRate_perHour = S.SpikeRate_Hz * 3600;
+
+if only_amb == 1
+    S(S.Duration_sec < 3600*12,:) = [];
+elseif only_amb == 2
+    S(S.Duration_sec > 3600*12,:) = [];
+end
 
 Sg = groupsummary(S,'Patient','mean','SpikeRate_perHour');
 Sg.Properties.VariableNames = {'Patient','GroupCount','MeanSpikeRate_perHour'};
