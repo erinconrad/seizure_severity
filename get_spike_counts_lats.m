@@ -36,7 +36,8 @@ varTypes = {'string','double','double', ...
 Summary  = table('Size',[0 numel(varNames)], 'VariableTypes', varTypes, 'VariableNames', varNames);
 
 %% ===== Load existing (and build donePairs by Patient-Session) =====
-donePairs = string.empty(1,0);
+% Column-empty so vertical concatenation is safe
+donePairs = string.empty(0,1);
 
 if ~OVERWRITE && isfile(outCsv)
     try
@@ -69,6 +70,7 @@ if ~OVERWRITE && isfile(outCsv)
 
         Summary   = Existing;
         donePairs = strcat(string(Summary.Patient), "_", string(Summary.Session));
+        donePairs = donePairs(:);  % ensure column vector
         fprintf('Loaded existing summary (%d rows). Using (Patient,Session) to skip.\n', height(Summary));
     catch ME
         warning('Could not read existing summary (%s). Proceeding as empty.\n%s', outCsv, ME.message);
@@ -170,7 +172,6 @@ for k = 1:numel(files)
 
     if runVar ~= ""
         runNums = double(T.(runVar)(:));
-        % Sanitize run numbers: require finite
         runNums(~isfinite(runNums)) = nan;
 
         % Unique runs in file order
@@ -187,7 +188,6 @@ for k = 1:numel(files)
             % ----- First 24 runs (or entire file if <24 runs, per request) -----
             if numel(uniqRuns) >= 24
                 takeRuns = uniqRuns(1:24);
-                % Sum over runs, respecting run boundaries (don’t let the skip window cross runs)
                 first24_total = 0; first24_L = 0; first24_R = 0; first24_dur = 0;
                 for r = 1:numel(takeRuns)
                     idxr = find(runNums == takeRuns(r));
@@ -217,7 +217,7 @@ for k = 1:numel(files)
     Summary = [Summary; cell2table(newRow, 'VariableNames', varNames)]; %#ok<AGROW>
 
     % Track the pair as done so duplicates in the same run are skipped
-    donePairs = [donePairs; pairKey]; %#ok<AGROW>
+    donePairs(end+1,1) = pairKey; %#ok<AGROW>
 
     fprintf(['Processed (Patient=%g, Session=%g) %-40s  total=%4d  L=%4d  R=%4d  dur=%.1fs  longest=%.3fs  | ' ...
              '1stRun: total=%4d L=%4d R=%4d dur=%.1fs  | ' ...
