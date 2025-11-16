@@ -1,5 +1,6 @@
 %% Parameters
-only_ambulatories = 1; % 1 = only amb, 2 = only routine, 0 = all
+only_ambulatories = 2; % 1 = only amb, 2 = only routine, 0 = all
+which_runs = 1; % 1 = first hour, 2 = first 24 hours, 0 = all
 
 %% ===== Paths you gave =====
 outCsv     = '../data/SN_counts/spike_counts_summary.csv';   % from previous step
