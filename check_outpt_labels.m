@@ -35,7 +35,7 @@ outpt_flags = zeros(n,1);  % 0/1
 %% -------------------- MAIN LOOP -----------------------
 needLabels = ["LOC","ROC"];  % required labels (case-insensitive, trimmed)
 
-for k = 1:10%:n
+for k = 1:n
     f = edfFiles(k);
     fpath = string(fullfile(f.folder, f.name));
     filenames(k) = fpath;
