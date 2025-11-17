@@ -1,9 +1,10 @@
-%% spikerate_master_clearNames.m  — compact, de-duplicated pipeline 
+%% spikerate_master_clearNames_outptElecs.m  — compact, de-duplicated pipeline 
 %   Fig 1: Control panels (C → A → B)
 %   Fig 2: Spearman correlations (overall + by subtype)
 %
 % Design:
 %   * Filter to OUTPATIENTS if only_outpt==1.
+%       outpatient = (acquired_on contains "Spe" or "radnor") OR (outpt_elecs == 1 in outpt_label.csv)
 %   * Build patient typing + seizure frequency once from the (possibly filtered) report.
 %   * Keep a FULL view (no only_amb restriction) for clean Ambulatory vs Routine comparisons.
 %   * Build a FILTERED view (only_amb) for Fig 1 + Fig 2.
@@ -12,6 +13,7 @@
 % Paths
 spikeSummaryCsv   = '../data/SN_counts/spike_counts_summary.csv';
 reportCsv         = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-10_1443.csv';
+outptLabelCsv     = '../data/outpt_label.csv';   % NEW: EEG-level outpatient labels (outpt_elecs)
 
 % Which segment of the EEG to use for spike rates
 %   0 = whole file, 1 = first run (~1h), 2 = first 24 runs (~24h)
@@ -19,7 +21,7 @@ which_runs  = 0;
 
 % Cohort filters
 only_amb    = 2;   % 1 = ONLY ambulatory (>=12h); 2 = ONLY routine (<=12h); 0 = all
-only_outpt  = 1;   % 1 = keep only EEGs with acquired_on containing 'Spe' or 'radnor'
+only_outpt  = 1;   % 1 = keep only outpatient EEGs (as defined above)
 
 % Report column for panel C
 reportColName = 'report_SPORADIC_EPILEPTIFORM_DISCHARGES';
@@ -42,6 +44,168 @@ spearman_yLims = [-3, 2];           % log10(spikes/min)
 fig1_out   = '../figures/spikerate_control_panels.png';
 fig2_out   = '../figures/spearman_spikerate_szfreq_log10_min_month_fixedaxes.png';
 resultsCsv = '../output/spearman_spikerate_szfreq_log10_min_month_fixedaxes.csv';
+
+%% ======================= ELECS-ONLY OUTPATIENT SUMMARY =======================
+% Build a table of cases where:
+%   outpt_elecs == 1
+%   AND acquired_on does NOT contain 'spe' or 'radnor'
+%   AND acquired_on does NOT contain 'pmc'
+%
+% Also define OutptByElecs_nonPmc to use later in the outpatient filter.
+
+% --- Load report (for acquired_on) ---
+ReportForOutptQC = readtable(reportCsv, 'TextType','string', 'VariableNamingRule','preserve');
+if ~isnumeric(ReportForOutptQC.patient_id)
+    ReportForOutptQC.patient_id = double(str2double(string(ReportForOutptQC.patient_id)));
+end
+if ~isnumeric(ReportForOutptQC.session_number)
+    ReportForOutptQC.session_number = double(str2double(string(ReportForOutptQC.session_number)));
+end
+
+hasAcq = ismember('acquired_on', ReportForOutptQC.Properties.VariableNames);
+if ~hasAcq
+    warning('Report lacks "acquired_on"; Elecs-only summary will not show acquisition site and Pmc filtering cannot be applied.');
+end
+
+acqStr = strings(height(ReportForOutptQC),1);
+if hasAcq
+    acqStr = lower(strtrim(string(ReportForOutptQC.acquired_on)));
+end
+
+% outpatient-by-report (Spe/Radnor)
+isOutpt_report = hasAcq & ~ismissing(acqStr) & (contains(acqStr,"spe") | contains(acqStr,"radnor"));
+OutptByReport = unique(ReportForOutptQC(isOutpt_report, {'patient_id','session_number'}));
+OutptByReport.Properties.VariableNames = {'Patient','Session'};
+
+% --- Load and parse outpt_label.csv (your current format) ---
+OutptLabelRaw = readtable(outptLabelCsv, ...
+                          'TextType','string', ...
+                          'VariableNamingRule','preserve');
+
+% Last column is payload: "sub-PennXXXX_ses-Y_task-EEG_eeg.edf,PennXXXX,Y,1"
+payloadVar = OutptLabelRaw.Properties.VariableNames{end};
+payload    = string(OutptLabelRaw.(payloadVar));
+
+parts = split(payload, ',');   % [filename, PennID, session_id, outpt_flag]
+if size(parts,2) < 4
+    error('outpt_label.csv payload could not be split into 4 comma-separated pieces; got %d columns.', size(parts,2));
+end
+
+filenamePart = parts(:,1);     % e.g. "sub-Penn1007_ses-2_task-EEG_eeg.edf"
+pennIdStr    = parts(:,2);     % e.g. "Penn1007"
+sessStr      = parts(:,3);     % e.g. "2"
+flagStr      = parts(:,4);     % e.g. "1"
+
+% Convert "Penn1007" -> 1007
+pidNumStr = regexprep(pennIdStr, '^[^\d]*', '');
+Patient   = double(str2double(pidNumStr));
+Session   = double(str2double(sessStr));
+OutptFlag = double(str2double(flagStr));
+
+% Reconstruct full EDF path from the path-component columns
+% (columns 2:end-1 are "mnt","sauce","littlab",...,"eeg")
+pathPartVars = OutptLabelRaw.Properties.VariableNames(2:end-1);
+pathParts    = string(OutptLabelRaw{:, pathPartVars});        % N x K string array
+pathPrefix   = join(pathParts, "/", 2);                       % "mnt/sauce/.../eeg"
+FullPath     = "/" + pathPrefix + "/" + filenamePart;         % "/mnt/sauce/.../eeg/sub-Penn...edf"
+
+PennID = pennIdStr;  % keep original "Penn####" string
+
+OutptLabelParsed = table(Patient, Session, OutptFlag, FullPath, PennID, ...
+                         'VariableNames', {'Patient','Session','OutptElecs','FullPath','PennID'});
+
+% Sessions outpatient-by-elecs (raw, before Pmc filtering)
+OutptByElecs = unique(OutptLabelParsed(OutptLabelParsed.OutptElecs == 1 & ...
+                                       isfinite(OutptLabelParsed.Patient) & ...
+                                       isfinite(OutptLabelParsed.Session), ...
+                                       {'Patient','Session'}));
+
+% --- Attach acquisition site to OutptByElecs to identify Pmc vs non-Pmc ---
+if hasAcq && ~isempty(OutptByElecs)
+    JoinElecAcq = outerjoin(OutptByElecs, ...
+        ReportForOutptQC(:, {'patient_id','session_number','acquired_on'}), ...
+        'LeftKeys',  {'Patient','Session'}, ...
+        'RightKeys', {'patient_id','session_number'}, ...
+        'Type','left', ...
+        'MergeKeys', false);
+
+        if ismember('acquired_on', JoinElecAcq.Properties.VariableNames)
+        acqElec = lower(strtrim(string(JoinElecAcq.acquired_on)));
+    else
+        acqElec = strings(height(JoinElecAcq),1);
+    end
+
+    % Sites where we DO NOT trust the outpt_elecs rule
+    isBadSite_elec = contains(acqElec,"pmc") | contains(acqElec,"pah") | ...
+        contains(acqElec,'cch') | contains(acqElec,'emu') | contains(acqElec,'pmuc');
+    isSpeRad_elec  = contains(acqElec,"spe") | contains(acqElec,"radnor");
+
+    % Non-Pmc / non-Pah sessions where outpt_elecs==1
+    OutptByElecs_nonPmc = unique(JoinElecAcq(~isBadSite_elec, {'Patient','Session'}));
+
+    % Summary counts
+    n_total_elec   = height(OutptByElecs);
+    n_nonBad_elec  = height(OutptByElecs_nonPmc);
+    n_bad_elec     = n_total_elec - n_nonBad_elec;
+
+    fprintf('\n=== Outpatient by outpt_elecs summary ===\n');
+    fprintf('Total sessions with outpt_elecs==1                      : %d\n', n_total_elec);
+    fprintf('  Non-Pmc / non-Pah sessions (kept for elec rule)       : %d\n', n_nonBad_elec);
+    fprintf('  Pmc/Pah sessions (excluded from elec-based outpatient): %d\n', n_bad_elec);
+
+else
+    OutptByElecs_nonPmc = OutptByElecs;  %#ok<NASGU> % may be empty; still define
+end
+
+% --- Find sessions that are outpatient-by-elecs (non-Pmc) BUT NOT outpatient-by-report ---
+if exist('OutptByElecs_nonPmc','var') && ~isempty(OutptByElecs_nonPmc)
+    if isempty(OutptByReport)
+        ElecsOnlyKeys = OutptByElecs_nonPmc;
+    else
+        ElecsOnlyKeys = setdiff(OutptByElecs_nonPmc, OutptByReport);   % non-Pmc & not Spe/Radnor
+    end
+else
+    ElecsOnlyKeys = table('Size',[0 2], ...
+                          'VariableTypes',{'double','double'}, ...
+                          'VariableNames',{'Patient','Session'});
+end
+
+if isempty(ElecsOnlyKeys)
+    fprintf('\n=== Elecs-only outpatient candidates (non-Pmc, not Spe/Radnor) ===\n');
+    fprintf('None.\n');
+    ElecsOnlySummary = table;  % empty
+else
+    % 1) Get EDF path + PennID from outpt_label parsing
+    ElecsOnlyBase = innerjoin(ElecsOnlyKeys, OutptLabelParsed, 'Keys',{'Patient','Session'});
+
+    % 2) Attach acquired_on from report (left join: keep only ElecsOnlyBase rows)
+    JoinAcq = outerjoin(ElecsOnlyBase, ...
+        ReportForOutptQC(:, {'patient_id','session_number','acquired_on'}), ...
+        'LeftKeys',  {'Patient','Session'}, ...
+        'RightKeys', {'patient_id','session_number'}, ...
+        'MergeKeys', false, ...
+        'Type','left');
+
+    % Drop redundant key columns from the report side if present
+    if ismember('patient_id', JoinAcq.Properties.VariableNames)
+        JoinAcq.patient_id = [];
+    end
+    if ismember('session_number', JoinAcq.Properties.VariableNames)
+        JoinAcq.session_number = [];
+    end
+
+    % Build the summary table
+    if ismember('acquired_on', JoinAcq.Properties.VariableNames)
+        ElecsOnlySummary = JoinAcq(:, {'FullPath','PennID','Session','acquired_on'});
+    else
+        ElecsOnlySummary = JoinAcq(:, {'FullPath','PennID','Session'});
+    end
+
+    fprintf('\n=== Elecs-only outpatient candidates (non-Pmc, not Spe/Radnor) ===\n');
+    fprintf('N sessions with outpt_elecs==1, non-Pmc, NOT Spe/Radnor: %d\n', height(ElecsOnlySummary));
+    disp(head(ElecsOnlySummary, 10));   % show first 10 rows
+end
+
 
 %% ======================= CORE LOAD (ONCE) =======================
 % ---------- Load spike summary ----------
@@ -70,23 +234,65 @@ if ~isstring(ReportTable.epilepsy_type),   ReportTable.epilepsy_type  = string(R
 
 %% ======================= OUTPATIENT FILTER (APPLIED UP FRONT) =======================
 if only_outpt == 1
+
+    % ---------- 1) Start with empty outpatient key table ----------
+    OutptKeys = table('Size',[0 2], ...
+                      'VariableTypes',{'double','double'}, ...
+                      'VariableNames',{'Patient','Session'});
+
+    %% ---------- 2) Outpatient by acquired_on (Spe/Radnor) ----------
     if ismember('acquired_on', ReportTable.Properties.VariableNames)
         acqStr  = lower(strtrim(string(ReportTable.acquired_on)));
-        isOutpt = ~ismissing(acqStr) & (contains(acqStr,"spe") | contains(acqStr,"radnor"));
+        isOutpt_report = ~ismissing(acqStr) & (contains(acqStr,"spe") | contains(acqStr,"radnor"));
 
-        % Session keys to keep
-        OutptKeys = unique(ReportTable(isOutpt, {'patient_id','session_number'}));
-        OutptKeys.Properties.VariableNames = {'Patient','Session'};
-
-        % Filter spike table and report to outpatient sessions
-        SpikeSummaryTable = innerjoin(SpikeSummaryTable, OutptKeys, 'Keys', {'Patient','Session'});
-        ReportTable = innerjoin(ReportTable, OutptKeys, ...
-                        'LeftKeys', {'patient_id','session_number'}, ...
-                        'RightKeys', {'Patient','Session'});
-        fprintf('[Outpatient filter] Kept %d spike rows and %d report rows.\n', height(SpikeSummaryTable), height(ReportTable));
+        if any(isOutpt_report)
+            OutptByReport = unique(ReportTable(isOutpt_report, {'patient_id','session_number'}));
+            OutptByReport.Properties.VariableNames = {'Patient','Session'};
+            % Make sure numeric
+            if ~isnumeric(OutptByReport.Patient)
+                OutptByReport.Patient = double(str2double(string(OutptByReport.Patient)));
+            end
+            if ~isnumeric(OutptByReport.Session)
+                OutptByReport.Session = double(str2double(string(OutptByReport.Session)));
+            end
+            OutptKeys = [OutptKeys; OutptByReport];
+        end
     else
-        error('Report lacks "acquired_on"; cannot apply outpatient filter.');
+        warning('Report lacks "acquired_on"; using only outpt_label.csv (if available) to define outpatients.');
     end
+
+       %% ---------- 3) Add outpatient by outpt_elecs (NON-Pmc ONLY) ----------
+            %% ---------- 3) Add outpatient by outpt_elecs (NON-Pmc / NON-Pah ONLY) ----------
+        % Use OutptByElecs_nonPmc computed in the ELECS-ONLY block above
+        % (this actually means sessions that are NOT Pmc and NOT Pah).
+        if exist('OutptByElecs_nonPmc','var') && ~isempty(OutptByElecs_nonPmc)
+            OutptKeys = [OutptKeys; OutptByElecs_nonPmc];
+        else
+            warning('No non-Pmc / non-Pah outpatient sessions identified from outpt_label.csv; using acquired_on only.');
+        end
+
+
+    %% ---------- 4) Finalize outpatient keys (deduplicate) ----------
+    if ~isempty(OutptKeys)
+        OutptKeys = unique(OutptKeys);
+    else
+        error('No outpatient sessions identified from either acquired_on or outpt_elecs (non-Pmc).');
+    end
+
+
+    %% ---------- 5) Apply filter to spike summary + report ----------
+    SpikeSummaryTable = innerjoin(SpikeSummaryTable, OutptKeys, 'Keys', {'Patient','Session'});
+    ReportTable = innerjoin(ReportTable, OutptKeys, ...
+                    'LeftKeys', {'patient_id','session_number'}, ...
+                    'RightKeys', {'Patient','Session'});
+
+    fprintf(['[Outpatient filter] Outpatients defined as:\n' ...
+         '  - acquired_on containing "Spe" or "Radnor" OR\n' ...
+         '  - outpt_elecs == 1 AND acquired_on does NOT contain "Pmc" or "Pah"\n' ...
+         '    (from %s)\n'], outptLabelCsv);
+
+    fprintf('[Outpatient filter] Kept %d spike rows and %d report rows.\n', ...
+            height(SpikeSummaryTable), height(ReportTable));
 end
 
 % Keep a FULL (already outpatient-restricted if chosen) copy for modality comparisons
@@ -112,7 +318,7 @@ compare_szfreq_by_modality(ViewsFull.Sessions, ViewsFull.SzFreqPerPat);
 %% ======================= FIGURE 1: CONTROL PANELS (C → A → B) =======================
 SessionLevelSpikeRates   = Views.SessionLevelSpikeRates;      % per-session spikes/min (selected segment)
 ReportForKeptSessions    = Views.ReportForKeptSessions;       % report rows matching sessions used
-PatientLevelSpikeRates   = Views.PatientLevelSpikeRates;       % per-patient mean spike rates + typing
+PatientLevelSpikeRates   = Views.PatientLevelSpikeRates;      % per-patient mean spike rates + typing
 SubtypePairs             = Views.Canonical3_Pairs;            % pair labels for subtype comparisons
 p_pair_bonf              = Views.PvalsPairwiseBonf;
 p_pair_raw               = Views.PvalsPairwise;
@@ -310,27 +516,27 @@ tiledlayout(f2,2,2,'Padding','compact','TileSpacing','compact');
 fontL = 20;
 
 % A. Overall
-axA = nexttile(1); hold(axA,'on'); grid(axA,'on'); box(axA,'off');
-xline(axA, xZero, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
-yline(axA, yZero, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+axA2 = nexttile(1); hold(axA2,'on'); grid(axA2,'on'); box(axA2,'off');
+xline(axA2, xZero, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+yline(axA2, yZero, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 baseColor = [0.4 0.4 0.4];
-scatter(axA, Tall.logSzFreq(nonZero_all), Tall.logSpikeRate(nonZero_all), 14, baseColor, 'filled', 'MarkerFaceAlpha', 0.25);
-plot(axA, Tall.logSzFreq(onlySz_all)+dx,   Tall.logSpikeRate(onlySz_all),   '*','Color',baseColor,'MarkerSize',7,'LineWidth',1);
-plot(axA, Tall.logSzFreq(onlyRate_all),    Tall.logSpikeRate(onlyRate_all)+dy,'*','Color',baseColor,'MarkerSize',8,'LineWidth',1);
-plot(axA, Tall.logSzFreq(bothZero_all)+dx, Tall.logSpikeRate(bothZero_all)+dy,'*','Color',baseColor,'MarkerSize',8,'LineWidth',1.2);
+scatter(axA2, Tall.logSzFreq(nonZero_all), Tall.logSpikeRate(nonZero_all), 14, baseColor, 'filled', 'MarkerFaceAlpha', 0.25);
+plot(axA2, Tall.logSzFreq(onlySz_all)+dx,   Tall.logSpikeRate(onlySz_all),   '*','Color',baseColor,'MarkerSize',7,'LineWidth',1);
+plot(axA2, Tall.logSzFreq(onlyRate_all),    Tall.logSpikeRate(onlyRate_all)+dy,'*','Color',baseColor,'MarkerSize',8,'LineWidth',1);
+plot(axA2, Tall.logSzFreq(bothZero_all)+dx, Tall.logSpikeRate(bothZero_all)+dy,'*','Color',baseColor,'MarkerSize',8,'LineWidth',1.2);
 
 X = [ones(sum(nonZero_all),1), Tall.logSzFreq(nonZero_all)];
 b = X \ Tall.logSpikeRate(nonZero_all);
 xgrid = linspace(xLims(1), xLims(2), 300)';
-plot(axA, xgrid, b(1) + b(2)*xgrid, 'k-', 'LineWidth', 2);
+plot(axA2, xgrid, b(1) + b(2)*xgrid, 'k-', 'LineWidth', 2);
 
-xlim(axA, xLims); ylim(axA, yLims);
-xlabel(axA,'log_{10} Seizures per month','FontSize',fontL);
-ylabel(axA,'log_{10} Spikes per minute','FontSize',fontL);
-title(axA, sprintf('A. All epilepsy  (N=%d) — %s', height(Tall), segLabel), 'FontSize',fontL, 'FontWeight','bold');
+xlim(axA2, xLims); ylim(axA2, yLims);
+xlabel(axA2,'log_{10} Seizures per month','FontSize',fontL);
+ylabel(axA2,'log_{10} Spikes per minute','FontSize',fontL);
+title(axA2, sprintf('A. All epilepsy  (N=%d) — %s', height(Tall), segLabel), 'FontSize',fontL, 'FontWeight','bold');
 txtA = sprintf('Spearman r=%.3f, p=%.3g', rs_all, p_all);
-text(axA, 0.98, 0.95, txtA, 'Units','normalized','HorizontalAlignment','right','VerticalAlignment','top','FontSize',fontL-2,'FontWeight','bold');
-set(axA,'FontSize',fontL);
+text(axA2, 0.98, 0.95, txtA, 'Units','normalized','HorizontalAlignment','right','VerticalAlignment','top','FontSize',fontL-2,'FontWeight','bold');
+set(axA2,'FontSize',fontL);
 
 % B/C/D panels in order: Frontal, Temporal, General
 panelOrder  = {'Frontal','Temporal','General'};
