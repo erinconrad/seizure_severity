@@ -55,7 +55,7 @@ roc_ratio   = nan(n,1);       % p60/pall for ROC
 %% -------------------- MAIN LOOP -----------------------
 needLabels = ["LOC","ROC"];  % required labels (case-insensitive, trimmed)
 
-for k = 1:20%n
+for k = 1:n
     f = edfFiles(k);
     fpath = string(fullfile(f.folder, f.name));
     filenames(k) = fpath;
