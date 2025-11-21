@@ -17,6 +17,12 @@ function paired_spikerate_by_hasSz(which_runs)
 %   - Per patient, paired test compares the mean of EEGs matched to HasSz==0
 %     vs the mean of EEGs matched to HasSz==1.
 %
+% Outpatient definition (when only_outpt==1):
+%   outpatient if and only if:
+%     (1) acquired_on contains "spe" or "radnor" (case-insensitive)
+%         OR
+%     (2) report_patient_class == "Outpatient"
+%
 % Outputs:
 %   - 2x2 spaghetti plot of per-patient paired means
 %   - Console summary with raw and Bonferroni-corrected p-values
@@ -27,18 +33,18 @@ if nargin < 1, which_runs = 0; end
 %% ======================= CONFIG =======================
 % Paths
 outCsv     = '../data/SN_counts/spike_counts_summary.csv';
-reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-10_1443.csv';
+reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-19_1231.csv';
 pairsOut   = '../output/eeg_visit_pairs_pairedmeans.csv';
 saveAudit  = true;   % write the matched-pairs audit CSV
 
 % Filters
-only_amb     = 0;          % 1 = ONLY ambulatory (Duration_sec >= 12h); 2 = ONLY routine (<=12h); 0 = all
-only_outpt   = 1;          % 1 = restrict to outpatient sites if 'acquired_on' available
+only_amb     = 2;          % 1 = ONLY ambulatory (Duration_sec >= 12h); 2 = ONLY routine (<=12h); 0 = all
+only_outpt   = 1;          % 1 = restrict to outpatient EEGs using outpatient rule (see header)
 outpt_tokens = ["spe","radnor"]; % lowercase tokens to match in 'acquired_on'
 
 % Asymmetric windows (days) for matching EEG to visit
 preGapDays  = 365;   % EEG may be up to this many days BEFORE the visit
-postGapDays = 30;   % EEG may be up to this many days AFTER  the visit
+postGapDays = 30;    % EEG may be up to this many days AFTER  the visit
 
 % Transform (visualization only)
 useLogTransform = false;  % log1p(spikes/hour) before averaging/plotting
@@ -90,7 +96,9 @@ R = readtable(reportFile, 'TextType','string', 'VariableNamingRule','preserve');
 reqR = {'patient_id','session_number','start_time_deid','visit_dates_deid','visit_hasSz', ...
         'epilepsy_type','epilepsy_specific'};
 assert(all(ismember(reqR, R.Properties.VariableNames)), 'Report file missing required fields.');
-hasAcq = ismember('acquired_on', R.Properties.VariableNames); % optional
+
+hasAcq   = ismember('acquired_on',          R.Properties.VariableNames); % optional
+hasClass = ismember('report_patient_class', R.Properties.VariableNames); % optional
 
 if ~isnumeric(R.patient_id),     R.patient_id     = double(str2double(string(R.patient_id))); end
 if ~isnumeric(R.session_number), R.session_number = double(str2double(string(R.session_number))); end
@@ -154,23 +162,63 @@ validP = double(PerPat.Patient(~isBad));
 S = S(ismember(S.Patient, validP), :);
 R = R(ismember(R.patient_id, validP), :);
 
-%% ============== Optional outpatient restriction ==============
-if only_outpt == 1 && hasAcq
-    RJ = R(:, {'patient_id','session_number','acquired_on'});
-    SJ = innerjoin(S, RJ, 'LeftKeys',{'Patient','Session'}, 'RightKeys',{'patient_id','session_number'}, 'RightVariables','acquired_on');
-    acq = strtrim(lower(string(SJ.acquired_on)));
-    keep_out = ~ismissing(acq) & contains_any_token_(acq, outpt_tokens);
-    SJ = SJ(keep_out, :);
-    keepVars = intersect(S.Properties.VariableNames, SJ.Properties.VariableNames, 'stable');
-    keepVars = unique([keepVars, {'SpikeRate_perHour','acquired_on'}], 'stable');
-    S = SJ(:, keepVars);
-elseif only_outpt == 1 && ~hasAcq
-    warning('Report lacks "acquired_on"; outpatient filter skipped.');
+%% ============== Optional outpatient restriction (new rule) ==============
+if only_outpt == 1
+    if ~(hasAcq || hasClass)
+        warning('Report lacks both "acquired_on" and "report_patient_class"; outpatient filter skipped.');
+    else
+        % Build a small join table with whichever outpatient fields exist
+        keepCols = {'patient_id','session_number'};
+        rightVars = {};
+        if hasAcq
+            keepCols{end+1} = 'acquired_on';
+            rightVars{end+1} = 'acquired_on';
+        end
+        if hasClass
+            keepCols{end+1} = 'report_patient_class';
+            rightVars{end+1} = 'report_patient_class';
+        end
+
+        RJ = R(:, keepCols);
+        SJ = innerjoin(S, RJ, ...
+            'LeftKeys',  {'Patient','Session'}, ...
+            'RightKeys', {'patient_id','session_number'}, ...
+            'RightVariables', rightVars);
+
+        % Outpatient rule:
+        %   (acquired_on contains "spe"/"radnor") OR (report_patient_class == "Outpatient")
+        nSJ = height(SJ);
+        isSpeRad   = false(nSJ,1);
+        isOutClass = false(nSJ,1);
+
+        if hasAcq
+            acq = strtrim(lower(string(SJ.acquired_on)));
+            isSpeRad = ~ismissing(acq) & contains_any_token_(acq, outpt_tokens);
+        end
+        if hasClass
+            cls = strtrim(lower(string(SJ.report_patient_class)));
+            isOutClass = ~ismissing(cls) & strcmp(cls, 'outpatient');
+        end
+
+        keep_out = isSpeRad | isOutClass;
+        SJ = SJ(keep_out, :);
+
+        if isempty(SJ)
+            warning('Outpatient filter removed all EEGs; continuing with empty S.');
+            S = S([],:);  % will bail later when no pairs
+        else
+            % Keep original S variables, plus SpikeRate_perHour and outpatient info if present
+            keepVars = intersect(S.Properties.VariableNames, SJ.Properties.VariableNames, 'stable');
+            keepVars = unique([keepVars, {'SpikeRate_perHour'} , rightVars], 'stable');
+            S = SJ(:, keepVars);
+        end
+    end
 end
 
 %% ================= JOIN + MATCH (asymmetric windows) =================
 rightVars = {'EEG_Date','VisitDates','HasSzVec','epilepsy_type','epilepsy_specific'};
-if hasAcq, rightVars{end+1} = 'acquired_on'; end
+if hasAcq,   rightVars{end+1} = 'acquired_on'; end
+if hasClass, rightVars{end+1} = 'report_patient_class'; end
 
 JR = innerjoin(S, R, ...
     'LeftKeys',{'Patient','Session'}, ...
@@ -180,6 +228,9 @@ JR = innerjoin(S, R, ...
 % If 'acquired_on' absent, create placeholder for audit
 if ~ismember('acquired_on', JR.Properties.VariableNames)
     JR.acquired_on = strings(height(JR),1);
+end
+if ~ismember('report_patient_class', JR.Properties.VariableNames)
+    JR.report_patient_class = strings(height(JR),1);
 end
 
 % Keep rows with valid EEG date and at least one visit date
