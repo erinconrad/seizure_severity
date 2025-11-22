@@ -198,6 +198,10 @@ SpikeSummaryTable_FULL = SpikeSummaryTable;
 %% ======================= BUILD PATIENT-LEVEL METRICS ONCE =======================
 [PatientTypingAll, SzFreqPerPatient] = build_patient_metrics_from_report(ReportTable, canonical3,hassz_replace); % looks good!
 
+%% ======================= GET PAIRED SPIKE RATE ===============================
+run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
+    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN);
+
 %% ======================= RESTRICT TO STUDY TYPE =======================
 % View 1: FULL (no only_amb restriction) — for ambulatory vs routine comparisons
 ViewsFull.Sessions      = SpikeSummaryTable_FULL;
@@ -328,6 +332,15 @@ G_B = [repmat("Epilepsy", n_ep, 1); repmat("NESD", n_nes, 1)];
 % ---- Panel C calculations: General vs Temporal vs Frontal (patient-level) ----
 Y_C = to_log10_per_min(SubtypeSubsetTable.MeanSpikeRate_perHour, EPS_PER_MIN);
 
+% === NEW: Figure 1 (binary spike rate using cutoff 1 spike/hour) ==========
+fig1_bin_out    = '../figures/spikerate_control_panels_binary_1perhr.png';
+cutoff_per_hour = 10;
+
+make_control_fig_binary_spikerate( ...
+    x_abs, x_pre, ...                 % per-session spikes/min for Panel A
+    x_ep,  x_nes, ...                 % per-patient spikes/hour for Panel B
+    SubtypeSubsetTable, canonical3, ... % subtype table for Panel C
+    cutoff_per_hour, fig1_bin_out);
 
 
 % ---- Draw figure ----
@@ -1206,4 +1219,556 @@ if nargin >= 6 && ~isempty(outPng)
     fprintf('Saved Fig (Spearman non-zero only): %s\n', outPng);
 end
 
+end
+
+function run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
+    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN)
+% run_paired_spikerate_by_hasSz
+%   Uses ALREADY-LOADED and ALREADY-OUTPATIENT-FILTERED:
+%       - SpikeSummaryTable (with SpikeRate_perHour / SpikeRate_perMin)
+%       - ReportTable       (with patient_id, session_number, visit_dates_deid, visit_hasSz, etc.)
+%       - PatientTypingAll  (from build_patient_metrics_from_report)
+%
+%   For each patient:
+%       compares mean spike rate across visits with HasSz==0 vs HasSz==1
+%       (per-patient paired analysis), for ALL valid epilepsy patients
+%       (NESD + badTypes excluded).
+%
+%   Stats: Wilcoxon sign-rank on RAW spikes/hour.
+%   Plot:  log10(spikes/min) with jittered points + paired lines.
+%
+%   Cohort filters respected:
+%       - only_amb (0/all, 1/amb only, 2/routine only)
+%       - outpatient filter has already been applied upstream.
+
+    % ---------------- CONFIG LOCAL TO THIS ANALYSIS ----------------
+    pairsOut    = '../output/eeg_visit_pairs_pairedmeans.csv';
+    saveAudit   = true;
+    preGapDays  = 365;   % EEG may be up to this many days BEFORE the visit
+    postGapDays = 30;    % EEG may be up to this many days AFTER  the visit
+
+    % EPS in spikes/hour and spikes/min
+    EPS_PLOT_perMin = EPS_PER_MIN;          % already in per-minute units from main script
+    EPS_PLOT_perHr  = EPS_PLOT_perMin * 60; % equivalent in spikes/hour
+
+    % Segment label (for figure titles) — keep consistent with main script
+    switch which_runs
+        case 1
+            segLabel = 'First run (~1h)';
+        case 2
+            segLabel = 'First 24 runs (~24h)';
+        otherwise
+            segLabel = 'Whole file';
+    end
+    segLabel = string(segLabel);
+
+    % ---------------- COPY TABLES LOCALLY ----------------
+    S = SpikeSummaryTable;
+    R = ReportTable;
+
+    % Sanity: need these columns
+    needS = {'Patient','Session','Duration_sec','SpikeRate_perHour'};
+    if ~all(ismember(needS, S.Properties.VariableNames))
+        error('SpikeSummaryTable is missing required columns: %s', ...
+            strjoin(setdiff(needS, S.Properties.VariableNames), ', '));
+    end
+
+    needR = {'patient_id','session_number','start_time_deid','visit_dates_deid', ...
+             'visit_hasSz','epilepsy_type','epilepsy_specific'};
+    if ~all(ismember(needR, R.Properties.VariableNames))
+        error('ReportTable is missing required columns: %s', ...
+            strjoin(setdiff(needR, R.Properties.VariableNames), ', '));
+    end
+
+    % Ensure numeric IDs
+    if ~isnumeric(S.Patient),        S.Patient        = double(str2double(string(S.Patient)));        end
+    if ~isnumeric(S.Session),        S.Session        = double(str2double(string(S.Session)));        end
+    if ~isnumeric(R.patient_id),     R.patient_id     = double(str2double(string(R.patient_id)));     end
+    if ~isnumeric(R.session_number), R.session_number = double(str2double(string(R.session_number))); end
+
+    % ---------------- AMBULATORY / ROUTINE FILTER ON S ----------------
+    if only_amb == 1
+        S(S.Duration_sec < 3600*12,:) = [];
+    elseif only_amb == 2
+        S(S.Duration_sec > 3600*12,:) = [];
+    end
+
+    % ---------------- PATIENT-LEVEL INCLUSION: "ALL EPILEPSY" ----------------
+    % Use PatientTypingAll (already built in main script)
+    et = string(PatientTypingAll.EpilepsyType);
+    et_norm = lower(strtrim(et));
+    isEmpty = ismissing(et) | strlength(strtrim(et))==0;
+    isNESD  = et_norm == lower(strtrim(NESD_LABEL));
+    isBad   = isNESD | ismember(et_norm, badTypes) | isEmpty;
+
+    validP = double(PatientTypingAll.Patient(~isBad));
+
+    S = S(ismember(S.Patient,     validP), :);
+    R = R(ismember(R.patient_id,  validP), :);
+
+
+    % ---------------- EEG DATE FROM start_time_deid ----------------
+    rawStart = string(R.start_time_deid);
+    okStart  = ~ismissing(rawStart) & strlength(strtrim(rawStart))>0;
+    R.EEG_Date = NaT(height(R),1);
+    R.EEG_Date(okStart) = datetime(strtrim(rawStart(okStart)), 'InputFormat','yyyy-MM-d HH:mm:ss');
+    
+
+    % ---------------- PARSE visit_dates_deid + visit_hasSz ----------------
+    R.VisitDates = cell(height(R),1);
+    R.HasSzVec   = cell(height(R),1);
+    for i = 1:height(R)
+        % visit_dates_deid
+        vstr = strtrim(string(R.visit_dates_deid(i)));
+        if strlength(vstr)>0 && vstr~="[]"
+            vcell = jsondecode(vstr);
+            vdt   = datetime(vcell, 'InputFormat','yyyy-MM-dd');
+            R.VisitDates{i} = vdt(:);
+        else
+            R.VisitDates{i} = NaT(0,1);
+        end
+
+        % visit_hasSz
+        hstr = strtrim(string(R.visit_hasSz(i)));
+        if strlength(hstr)>0 && hstr~="[]"
+            hv = jsondecode(char(hstr));
+            has_sz = double(hv(:));
+            has_sz(has_sz==2) = nan;
+            R.HasSzVec{i} = has_sz;
+        else
+            R.HasSzVec{i} = nan(0,1);
+        end
+    end
+
+    % ---------------- JOIN S + R ON (Patient, Session) ----------------
+    rightVars = {'EEG_Date','VisitDates','HasSzVec','epilepsy_type'};
+    if ~ismember('acquired_on',          R.Properties.VariableNames), R.acquired_on = strings(height(R),1); end
+    if ~ismember('report_PATIENT_CLASS', R.Properties.VariableNames), R.report_PATIENT_CLASS = strings(height(R),1); end
+    rightVars{end+1} = 'acquired_on';
+    rightVars{end+1} = 'report_PATIENT_CLASS';
+
+    JR = innerjoin(S, R, ...
+        'LeftKeys',{'Patient','Session'}, ...
+        'RightKeys',{'patient_id','session_number'}, ...
+        'RightVariables', rightVars);
+
+    % keep rows with valid EEG date and at least one visit date
+    JR = JR(~isnat(JR.EEG_Date) & cellfun(@(v)~isempty(v) & any(~isnat(v)), JR.VisitDates), :);
+
+    if isempty(JR)
+        warning('run_paired_spikerate_by_hasSz: No EEG rows with valid visit arrays; skipping.');
+        return;
+    end
+
+    % ---------------- CONSTRUCT EEG–VISIT PAIRS (NEAREST VISIT IN ASYMMETRIC WINDOW) ----------------
+    pairs = table('Size',[0 9], ...
+        'VariableTypes', {'double','double','string','datetime','double','datetime','double','double','string'}, ...
+        'VariableNames', {'Patient','Session','EEG_Name','EEG_Date','SpikeRate_perHour', ...
+                          'Visit_Date','HasSz','GapDays_abs','EpilepsyType'});
+
+    for i = 1:height(JR)
+        eegDate = JR.EEG_Date(i);
+        vdates  = JR.VisitDates{i};
+        hasV    = JR.HasSzVec{i};
+        pid     = JR.Patient(i);
+
+        if isempty(vdates) || isempty(hasV), continue; end
+        assert(numel(hasV)==numel(vdates))
+        nAlign = min(numel(vdates), numel(hasV));
+        if nAlign==0, continue; end
+        vdates = vdates(1:nAlign);
+        hasV   = hasV(1:nAlign);
+
+        % compute the difference in days between eeg and visit date
+        dSigned = days(eegDate - vdates);
+
+        % determine which are within allowable gap
+        elig = (dSigned >= -preGapDays) & (dSigned <= postGapDays);
+        if ~any(elig), continue; end
+
+        % Find the closest
+        [~, idxRel] = min(abs(dSigned(elig)));
+        idxVec = find(elig);
+        j = idxVec(idxRel);
+
+        thisHas = hasV(j);
+        if ~(isfinite(thisHas) && (thisHas==0 || thisHas==1))
+            continue
+        end
+
+        pairs = [pairs; {pid, JR.Session(i), JR.EEG_Name(i), eegDate, JR.SpikeRate_perHour(i), ...
+                         vdates(j), double(thisHas), abs(dSigned(j)), string(JR.epilepsy_type(i))}]; %#ok<AGROW>
+    end
+
+    fprintf('Matched %d EEG–visit pairs under [%d days pre, %d days post].\n', ...
+        height(pairs), preGapDays, postGapDays);
+
+
+    % Require ≥2 pairs per patient (at least two EEG–visit pairs)
+    gc = groupcounts(pairs,'Patient');
+    keepP2 = gc.Patient(gc.GroupCount>=2);
+    pairs  = pairs(ismember(pairs.Patient, keepP2), :);
+
+
+    % ---------------- PER-PATIENT MEANS: HasSz==0 vs HasSz==1 ----------------
+    % Group by patient
+    [G, pid] = findgroups(double(pairs.Patient));
+
+    % patient level means for visits without seizures
+    mu0_raw = splitapply(@(y,hs) mean(y(hs==0), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G); % average spike rate for each patient for visits without szs
+    mu1_raw = splitapply(@(y,hs) mean(y(hs==1), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G);
+
+    % number of visits of each type (has sz==1 and has sz == 0)
+    n0      = splitapply(@(hs) sum(hs==0),       pairs.HasSz, G); 
+    n1      = splitapply(@(hs) sum(hs==1),       pairs.HasSz, G);
+
+    if 0
+        table(mu0_raw,mu1_raw,n0,n1)
+    end
+    % Logical masks
+    isMu0NaN = isnan(mu0_raw);
+    isN0zero = (n0 == 0);
+    
+    % Assert that NaNs in mu0_raw correspond exactly to n0 == 0
+    assert(isequal(isMu0NaN, isN0zero), ...
+        'Mismatch: Some patients have mu0_raw = NaN but n0 > 0, or vice versa.');
+
+    % Logical masks
+    isMu1NaN = isnan(mu1_raw);
+    isN1zero = (n1 == 0);
+    
+    % Assert consistency
+    assert(isequal(isMu1NaN, isN1zero), ...
+        'Mismatch: Some patients have mu1_raw = NaN but n1 > 0, or vice versa.');
+
+
+    % only keep patients if there are visits with seizures AND visits
+    % without seizures
+    keep = isfinite(mu0_raw) & isfinite(mu1_raw) & (n0>0) & (n1>0);
+    yNoSz_raw     = mu0_raw(keep);       % HasSz==0 mean spike rate (spikes/hour)
+    ySz_raw       = mu1_raw(keep);       % HasSz==1 mean spike rate (spikes/hour)
+    patients_kept = pid(keep); %#ok<NASGU>
+
+    Npairs = numel(ySz_raw);
+
+
+    % Wilcoxon sign-rank on RAW spikes/hour
+    diffs_raw   = ySz_raw - yNoSz_raw;
+    p_signrank  = signrank(ySz_raw, yNoSz_raw, 'method','approx');
+    medDeltaRaw = median(diffs_raw, 'omitnan');
+    med0        = median(yNoSz_raw, 'omitnan');
+    med1        = median(ySz_raw,   'omitnan');
+
+      % ---------------- PLOT: log10(spikes/min) WITH JITTER ----------------
+    % Convert raw means from spikes/hour → spikes/min
+    yNoSz_perMin = yNoSz_raw / 60;
+    ySz_perMin   = ySz_raw   / 60;
+
+    % log10(spikes/min) with EPS guard (per-minute)
+    logNoSz = log10(max(yNoSz_perMin, EPS_PLOT_perMin));
+    logSz   = log10(max(ySz_perMin,   EPS_PLOT_perMin));
+
+    jitterWidth = 0.08;   % 0.05–0.12 looks nice
+
+    % Jittered x-positions for points (but NOT for lines)
+    x0_jit = -jitterWidth/2 + jitterWidth*rand(Npairs,1);      % around 0
+    x1_jit =  1 - jitterWidth/2 + jitterWidth*rand(Npairs,1);  % around 1
+
+    % "zero spikes" line in log10(spikes/min)
+    Y_ZERO = log10(EPS_PLOT_perMin);
+
+    % Choose y-limits: a bit below Y_ZERO, a bit above max data
+    yDataMax = max([logNoSz; logSz]);
+    Y_LIMS   = [Y_ZERO - 0.4, yDataMax + 0.4];
+
+    figure('Color','w','Position',[200 200 750 580]);
+    hold on; grid on; box off; set(gca,'FontSize',16);
+
+    % Paired lines (no jitter)
+    for i = 1:Npairs
+        plot([0 1], [logNoSz(i) logSz(i)], '-', 'Color',[0.7 0.7 0.7]);
+    end
+
+    % Jittered scatter points
+    scatter(x0_jit, logNoSz, 50, 'filled', 'MarkerFaceAlpha',0.8);
+    scatter(x1_jit, logSz,   50, 'filled', 'MarkerFaceAlpha',0.8);
+
+    % Horizontal "zero spike rate" line
+    yline(Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+
+    % Axes / labels
+    xlim([-0.25 1.25]);
+    ylim(Y_LIMS);
+    set(gca,'XTick',[0 1], ...
+            'XTickLabel',{'Visits without seizures','Visits with seizures'});
+    ylabel('log_{10} spike rate (spikes/min)');
+    title(sprintf('All epilepsy patients — %s', segLabel), ...
+        'FontSize',18,'FontWeight','bold');
+
+    subtitle(sprintf(['n=%d  median HasSz=0=%.3f/hr, HasSz=1=%.3f/hr, ' ...
+                      'median Δ=%.3f/hr,  p=%.3g'], ...
+        Npairs, med0, med1, medDeltaRaw, p_signrank));
+
+    % --------- Significance bar with p-value above the groups ----------
+    % Put it a bit below the top of the y-axis
+    yBar = Y_LIMS(2) - 0.07 * range(Y_LIMS);
+    tick = 0.03 * range(Y_LIMS);
+
+    % Horizontal bar from x=0 to x=1
+    plot([0 0 1 1], [yBar - tick, yBar, yBar, yBar - tick], ...
+        'k-', 'LineWidth', 1.3);
+
+    % p-value text centered between the two groups
+    text(0.5, yBar + 0.02*range(Y_LIMS), ...
+         sprintf('p = %.3g', p_signrank), ...
+         'HorizontalAlignment','center', ...
+         'VerticalAlignment','bottom', ...
+         'FontSize',16, 'FontWeight','bold');
+
+
+    % ---------------- CONSOLE SUMMARY + AUDIT ----------------
+    fprintf('\nPaired sign-rank on per-patient mean spike rates (HasSz=1 minus HasSz=0) — %s:\n', segLabel);
+    fprintf('  n patients with both states = %d\n', Npairs);
+    fprintf('  Median HasSz=0 mean spike rate      = %.3f spikes/hour\n', med0);
+    fprintf('  Median HasSz=1 mean spike rate      = %.3f spikes/hour\n', med1);
+    fprintf('  Median difference (HasSz=1 - HasSz=0) = %.3f spikes/hour\n', medDeltaRaw);
+    fprintf('  Wilcoxon sign-rank p = %.3g\n', p_signrank);
+
+    if saveAudit
+        if ~exist(fileparts(pairsOut),'dir'), mkdir(fileparts(pairsOut)); end
+        writetable(pairs, pairsOut);
+        fprintf('Saved EEG–visit pairs audit to: %s\n', pairsOut);
+    end
+end
+
+function make_control_fig_binary_spikerate( ...
+    x_abs_perMin, x_pre_perMin, ...         % Panel A, per-session spikes/min
+    x_ep_perHour, x_nes_perHour, ...        % Panel B, per-patient spikes/hour
+    Canonical3_SubsetTable, canonical3, ... % Panel C, per-patient spikes/hour
+    cutoff_per_hour, outPng)
+% make_control_fig_binary_spikerate
+%   Recreates "Figure 1" using a binary spike-rate cutoff (e.g. 1 spike/hour).
+%
+% Panels:
+%   A) Reported spikes: No reported spikes vs Reported spikes (per-session)
+%   B) Epilepsy vs NESD (per-patient)
+%   C) General vs Temporal vs Frontal (per-patient)
+%
+%   For each group, we show stacked bars:
+%       <= cutoff_per_hour   vs   > cutoff_per_hour
+%   y-axis = proportion within that group.
+%
+% Inputs:
+%   x_abs_perMin   - spikes/min per session, report status == "absent"
+%   x_pre_perMin   - spikes/min per session, report status == "present"
+%   x_ep_perHour   - per-patient mean spikes/hour, epilepsy patients
+%   x_nes_perHour  - per-patient mean spikes/hour, NESD patients
+%   Canonical3_SubsetTable - table with variables:
+%         EpiType4 (categorical, e.g. "General","Temporal","Frontal")
+%         MeanSpikeRate_perHour
+%   canonical3     - string/cell array listing canonical subtype order
+%   cutoff_per_hour - numeric cutoff (e.g. 1 spike/hour)
+%   outPng         - filename to save the figure (PNG)
+
+    fontL = 18;
+
+    % ---------- Panel A data: per-session spikes/hour ----------
+    x_abs_hr = double(x_abs_perMin(:)) * 60;
+    x_pre_hr = double(x_pre_perMin(:)) * 60;
+    x_abs_hr = x_abs_hr(isfinite(x_abs_hr));
+    x_pre_hr = x_pre_hr(isfinite(x_pre_hr));
+
+    n_abs = numel(x_abs_hr);
+    n_pre = numel(x_pre_hr);
+
+    if n_abs == 0 || n_pre == 0
+        error('make_control_fig_binary_spikerate: Panel A has a group with zero sessions.');
+    end
+
+    n_abs_low  = nnz(x_abs_hr <= cutoff_per_hour);
+    n_abs_high = nnz(x_abs_hr >  cutoff_per_hour);
+    n_pre_low  = nnz(x_pre_hr <= cutoff_per_hour);
+    n_pre_high = nnz(x_pre_hr >  cutoff_per_hour);
+
+    propsA = [ ...
+        n_abs_low/(n_abs_low+n_abs_high),  n_abs_high/(n_abs_low+n_abs_high); ...
+        n_pre_low/(n_pre_low+n_pre_high),  n_pre_high/(n_pre_low+n_pre_high) ...
+    ];   % rows: [No reported; Reported], cols: [low, high]
+
+    % Chi-square for Panel A
+    grpA = [repmat("No reported spikes", n_abs, 1); ...
+            repmat("Reported spikes",    n_pre, 1)];
+    hiA  = [x_abs_hr > cutoff_per_hour; ...
+            x_pre_hr > cutoff_per_hour];
+    [tblA, chi2A, pA] = crosstab(categorical(grpA), categorical(hiA));
+    fprintf('\n=== Panel A (binary spike rate, cutoff=%.2f/hr) ===\n', cutoff_per_hour);
+    disp(tblA);
+    dfA = (size(tblA,1)-1)*(size(tblA,2)-1);
+    fprintf('Chi-square(%d) = %.3f, p = %.3g\n', dfA, chi2A, pA);
+
+    % ---------- Panel B data: per-patient (Epilepsy vs NESD) ----------
+    x_ep_hr  = double(x_ep_perHour(:));
+    x_nes_hr = double(x_nes_perHour(:));
+    x_ep_hr  = x_ep_hr(isfinite(x_ep_hr));
+    x_nes_hr = x_nes_hr(isfinite(x_nes_hr));
+
+    n_ep  = numel(x_ep_hr);
+    n_nes = numel(x_nes_hr);
+
+    if n_ep == 0 || n_nes == 0
+        error('make_control_fig_binary_spikerate: Panel B has a group with zero patients.');
+    end
+
+    n_ep_low   = nnz(x_ep_hr  <= cutoff_per_hour);
+    n_ep_high  = nnz(x_ep_hr  >  cutoff_per_hour);
+    n_nes_low  = nnz(x_nes_hr <= cutoff_per_hour);
+    n_nes_high = nnz(x_nes_hr >  cutoff_per_hour);
+
+    propsB = [ ...
+        n_ep_low/(n_ep_low+n_ep_high),       n_ep_high/(n_ep_low+n_ep_high); ...
+        n_nes_low/(n_nes_low+n_nes_high),    n_nes_high/(n_nes_low+n_nes_high) ...
+    ];   % rows: [Epilepsy; NESD], cols: [low, high]
+
+    % Chi-square for Panel B
+    grpB = [repmat("Epilepsy", n_ep, 1); ...
+            repmat("NESD",     n_nes,1)];
+    hiB  = [x_ep_hr > cutoff_per_hour; ...
+            x_nes_hr > cutoff_per_hour];
+    [tblB, chi2B, pB] = crosstab(categorical(grpB), categorical(hiB));
+    fprintf('\n=== Panel B (binary spike rate, cutoff=%.2f/hr) ===\n', cutoff_per_hour);
+    disp(tblB);
+    dfB = (size(tblB,1)-1)*(size(tblB,2)-1);
+    fprintf('Chi-square(%d) = %.3f, p = %.3g\n', dfB, chi2B, pB);
+
+    % ---------- Panel C data: subtype (General / Temporal / Frontal) ----------
+    rateC = double(Canonical3_SubsetTable.MeanSpikeRate_perHour(:));
+    typeC = string(Canonical3_SubsetTable.EpiType4(:));
+    maskC = isfinite(rateC) & strlength(typeC)>0;
+    rateC = rateC(maskC);
+    typeC = typeC(maskC);
+
+    if isstring(canonical3)
+        cats3 = cellstr(canonical3(:));
+    else
+        cats3 = canonical3(:);
+    end
+
+    nCats = numel(cats3);
+    propsC = nan(nCats, 2);   % [low, high] per subtype
+    countsC = nan(nCats, 2);  % absolute counts [low, high]
+
+    grpC_all = strings(0,1);
+    hiC_all  = false(0,1);
+
+    for k = 1:nCats
+        thisCat = string(cats3{k});
+        mask    = (typeC == thisCat);
+        r       = rateC(mask);
+        r       = r(isfinite(r));
+        n_here  = numel(r);
+        if n_here == 0
+            propsC(k,:)  = [NaN NaN];
+            countsC(k,:) = [0 0];
+            continue;
+        end
+        n_low  = nnz(r <= cutoff_per_hour);
+        n_high = nnz(r >  cutoff_per_hour);
+
+        propsC(k,:)  = [n_low/(n_low+n_high), n_high/(n_low+n_high)];
+        countsC(k,:) = [n_low, n_high];
+
+        grpC_all = [grpC_all; repmat(thisCat, n_here, 1)]; %#ok<AGROW>
+        hiC_all  = [hiC_all;  r > cutoff_per_hour];        %#ok<AGROW>
+    end
+
+    % Chi-square for Panel C (across 3 subtypes)
+    if numel(hiC_all) > 0
+        [tblC, chi2C, pC] = crosstab(categorical(grpC_all), categorical(hiC_all));
+        fprintf('\n=== Panel C (binary spike rate, cutoff=%.2f/hr) ===\n', cutoff_per_hour);
+        disp(tblC);
+        dfC = (size(tblC,1)-1)*(size(tblC,2)-1);
+        fprintf('Chi-square(%d) = %.3f, p = %.3g\n', dfC, chi2C, pC);
+    else
+        chi2C = NaN; pC = NaN;
+        fprintf('\n=== Panel C: no data for chi-square (no canonical subtypes present) ===\n');
+    end
+
+    % ---------- Draw figure ----------
+    f = figure('Color','w','Position',[60 60 1500 520]);
+    tiledlayout(f,1,3,'TileSpacing','compact','Padding','compact');
+
+    % ---- Panel A: Report Present vs Absent (per-session) ----
+    axA = nexttile; hold(axA,'on'); box(axA,'off'); grid(axA,'on');
+
+    dataA = propsA;  % 2x2, rows=groups, cols=[low,high]
+    bar(axA, 1:2, dataA, 'stacked');
+    set(axA,'XTick',1:2, ...
+        'XTickLabel',{'No reported spikes','Reported spikes'}, ...
+        'FontSize',fontL);
+    ylim(axA,[0 1]);
+    ylabel(axA,'Proportion of EEGs','FontSize',fontL);
+    title(axA, sprintf('A. Reported spikes (cutoff = %.1f /hr)', cutoff_per_hour), ...
+        'FontSize',fontL,'FontWeight','bold');
+    legend(axA, {'\leq 1 spike/hr','> 1 spike/hr'}, ...
+        'Location','southoutside','Orientation','horizontal');
+    text(axA, 0.98, 0.95, sprintf('\\chi^2 p=%.3g', pA), ...
+        'Units','normalized','HorizontalAlignment','right', ...
+        'VerticalAlignment','top','FontSize',fontL-2,'FontWeight','bold');
+
+    % ---- Panel B: Epilepsy vs NESD (per-patient) ----
+    axB = nexttile; hold(axB,'on'); box(axB,'off'); grid(axB,'on');
+
+    dataB = propsB;  % 2x2, rows=groups, cols=[low,high]
+    bar(axB, 1:2, dataB, 'stacked');
+    set(axB,'XTick',1:2, ...
+        'XTickLabel',{'Epilepsy','NESD'}, ...
+        'FontSize',fontL);
+    ylim(axB,[0 1]);
+    ylabel(axB,'Proportion of patients','FontSize',fontL);
+    title(axB, sprintf('B. Epilepsy vs NESD (cutoff = %.1f /hr)', cutoff_per_hour), ...
+        'FontSize',fontL,'FontWeight','bold');
+    legend(axB, {'\leq 1 spike/hr','> 1 spike/hr'}, ...
+        'Location','southoutside','Orientation','horizontal');
+    text(axB, 0.98, 0.95, sprintf('\\chi^2 p=%.3g', pB), ...
+        'Units','normalized','HorizontalAlignment','right', ...
+        'VerticalAlignment','top','FontSize',fontL-2,'FontWeight','bold');
+
+    % ---- Panel C: General vs Temporal vs Frontal (per-patient) ----
+    axC = nexttile; hold(axC,'on'); box(axC,'off'); grid(axC,'on');
+
+    % Only show categories that actually have data
+    hasData = ~all(isnan(propsC),2);
+    catsToShow = cats3(hasData);
+    dataC = propsC(hasData,:);   % rows = kept subtypes
+
+    if ~isempty(dataC)
+        xIdx = 1:numel(catsToShow);
+        bar(axC, xIdx, dataC, 'stacked');
+        set(axC,'XTick',xIdx, ...
+            'XTickLabel',catsToShow, ...
+            'FontSize',fontL);
+        ylim(axC,[0 1]);
+        ylabel(axC,'Proportion of patients','FontSize',fontL);
+        title(axC, sprintf('C. Epilepsy subtype (cutoff = %.1f /hr)', cutoff_per_hour), ...
+            'FontSize',fontL,'FontWeight','bold');
+        legend(axC, {'\leq 1 spike/hr','> 1 spike/hr'}, ...
+            'Location','southoutside','Orientation','horizontal');
+        if ~isnan(pC)
+            text(axC, 0.98, 0.95, sprintf('\\chi^2 p=%.3g', pC), ...
+                'Units','normalized','HorizontalAlignment','right', ...
+                'VerticalAlignment','top','FontSize',fontL-2,'FontWeight','bold');
+        end
+    else
+        axis(axC,'off');
+        title(axC,'C. Epilepsy subtype (no data)','FontSize',fontL,'FontWeight','bold');
+    end
+
+    % ---- Save figure ----
+    if nargin >= 8 && ~isempty(outPng)
+        if ~exist(fileparts(outPng),'dir')
+            mkdir(fileparts(outPng));
+        end
+        exportgraphics(f, outPng, 'Resolution', 300);
+        fprintf('Saved binary cutoff Fig 1 to: %s\n', outPng);
+    end
 end

@@ -6,9 +6,8 @@ function paired_spikerate_by_hasSz(which_runs)
 %
 % Purpose:
 %   For each patient, compare the mean spike rate across all matched visits
-%   with HasSz==0 vs HasSz==1 (paired per patient). Overall includes ALL
-%   valid epilepsy patients (not limited to General/Temporal/Frontal).
-%   Panels for General/Temporal/Frontal are shown if present.
+%   with HasSz==0 vs HasSz==1 (paired per patient), for ALL valid epilepsy
+%   patients (no subtype restriction in the analysis).
 %
 % Matching:
 %   - Each EEG is mapped to the nearest clinic visit within asymmetric windows:
@@ -21,39 +20,40 @@ function paired_spikerate_by_hasSz(which_runs)
 %   outpatient if and only if:
 %     (1) acquired_on contains "spe" or "radnor" (case-insensitive)
 %         OR
-%     (2) report_patient_class == "Outpatient"
+%     (2) report_PATIENT_CLASS == "Outpatient"
+%         OR
+%     (3) jay_in_or_out == "out"
 %
 % Outputs:
-%   - 2x2 spaghetti plot of per-patient paired means
-%   - Console summary with raw and Bonferroni-corrected p-values
-%   - CSV audit of matched pairs (optional toggle)
+%   - Single spaghetti plot of per-patient paired means (overall only),
+%     plotted as log10(spike rate in spikes/hour).
+%   - Wilcoxon sign-rank on RAW spike rates (spikes/hour).
+%   - Console summary.
+%
+% Erin 2025-11-21
 
 if nargin < 1, which_runs = 0; end
 
 %% ======================= CONFIG =======================
 % Paths
 outCsv     = '../data/SN_counts/spike_counts_summary.csv';
-reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-19_1231.csv';
+reportFile = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-19_1356.csv';
 pairsOut   = '../output/eeg_visit_pairs_pairedmeans.csv';
 saveAudit  = true;   % write the matched-pairs audit CSV
 
 % Filters
-only_amb     = 2;          % 1 = ONLY ambulatory (Duration_sec >= 12h); 2 = ONLY routine (<=12h); 0 = all
-only_outpt   = 1;          % 1 = restrict to outpatient EEGs using outpatient rule (see header)
-outpt_tokens = ["spe","radnor"]; % lowercase tokens to match in 'acquired_on'
+only_amb   = 2;   % 1 = ONLY ambulatory (Duration_sec >= 12h); 2 = ONLY routine (<=12h); 0 = all
+only_outpt = 1;   % 1 = restrict to outpatient EEGs using outpatient rule (see header)
 
 % Asymmetric windows (days) for matching EEG to visit
 preGapDays  = 365;   % EEG may be up to this many days BEFORE the visit
 postGapDays = 30;    % EEG may be up to this many days AFTER  the visit
 
-% Transform (visualization only)
-useLogTransform = false;  % log1p(spikes/hour) before averaging/plotting
-
-% Panels to display (not used for inclusion)
-displayTypes3 = ["General","Temporal","Frontal"];
-
 % Patient-level exclusion list (applies to EpilepsyType string)
 badTypes = lower(["Non-Epileptic Seizure Disorder","Uncertain if Epilepsy","Unknown or MRN not found",""]);
+
+% For plotting log10
+EPS_PLOT = 100e-3;   % spikes/hour guard for zeros
 
 %% ===== Select spike-count/duration columns per which_runs =====
 switch which_runs
@@ -81,7 +81,7 @@ end
 if ~isnumeric(S.Patient), S.Patient = double(str2double(string(S.Patient))); end
 if ~isnumeric(S.Session), S.Session = double(str2double(string(S.Session))); end
 
-% Segment spike rate (spikes/hour)
+% Segment spike rate (spikes/hour) for this analysis
 S.SpikeRate_perHour = double(S.(colCount)) ./ (double(S.(colDur))/3600);
 
 % Ambulatory/routine filter (by FULL duration)
@@ -97,9 +97,7 @@ reqR = {'patient_id','session_number','start_time_deid','visit_dates_deid','visi
         'epilepsy_type','epilepsy_specific'};
 assert(all(ismember(reqR, R.Properties.VariableNames)), 'Report file missing required fields.');
 
-hasAcq   = ismember('acquired_on',          R.Properties.VariableNames); % optional
-hasClass = ismember('report_patient_class', R.Properties.VariableNames); % optional
-
+% normalize IDs
 if ~isnumeric(R.patient_id),     R.patient_id     = double(str2double(string(R.patient_id))); end
 if ~isnumeric(R.session_number), R.session_number = double(str2double(string(R.session_number))); end
 
@@ -113,7 +111,7 @@ catch
     R.EEG_Date(okStart) = datetime(strtrim(rawStart(okStart)));
 end
 
-% Parse visit arrays
+% Parse visit arrays: VisitDates + HasSzVec
 R.VisitDates = cell(height(R),1);
 R.HasSzVec   = cell(height(R),1);
 for i = 1:height(R)
@@ -147,103 +145,147 @@ for i = 1:height(R)
     end
 end
 
-%% ============== Patient-level inclusion by epilepsy_type (NO type requirement) ==============
-% Build per-patient type mapping (EpilepsyType/EpiType3) without restricting to G/T/F.
-PerPat = derive_patient_types_(R);
+%% ============== Patient-level inclusion by epilepsy_type (NO subtype requirement) ==============
+PerPat = derive_patient_types_(R);   % gives Patient, EpilepsyType, EpiType3
 
-% Exclude patients with missing/empty epilepsy_type or in badTypes list
+% Exclude NESD/uncertain/unknown/empty
 et = string(PerPat.EpilepsyType);
 isEmpty = ismissing(et) | strlength(strtrim(et))==0;
 isBad   = ismember(lower(strtrim(et)), badTypes) | isEmpty;
 
 validP = double(PerPat.Patient(~isBad));
 
-% Restrict S/R to valid epilepsy patients (no requirement for General/Temporal/Frontal)
+% Restrict S/R to valid epilepsy patients
 S = S(ismember(S.Patient, validP), :);
 R = R(ismember(R.patient_id, validP), :);
 
-%% ============== Optional outpatient restriction (new rule) ==============
+%% ============== OUTPATIENT FILTER (Spe/Radnor OR PATIENT_CLASS OR jay_in_or_out) ==============
 if only_outpt == 1
-    if ~(hasAcq || hasClass)
-        warning('Report lacks both "acquired_on" and "report_patient_class"; outpatient filter skipped.');
+    fprintf('\n=== BUILDING OUTPATIENT KEYS (site rule OR report_PATIENT_CLASS OR jay_in_or_out) ===\n');
+
+    % required outpatient columns
+    reqCols = {'report_PATIENT_CLASS','jay_in_or_out'};
+    missingReq = setdiff(reqCols, R.Properties.VariableNames);
+    if ~isempty(missingReq)
+        error('Report table lacks required outpatient columns: %s', strjoin(missingReq, ', '));
+    end
+
+    hasAcqCol = ismember('acquired_on', R.Properties.VariableNames);
+    if ~hasAcqCol
+        warning('Report lacks "acquired_on"; Spe/Radnor outpatient-by-site rule will be unavailable.');
+        acqStr_report = strings(height(R),1);
     else
-        % Build a small join table with whichever outpatient fields exist
-        keepCols = {'patient_id','session_number'};
-        rightVars = {};
-        if hasAcq
-            keepCols{end+1} = 'acquired_on';
-            rightVars{end+1} = 'acquired_on';
+        acqStr_report = lower(strtrim(string(R.acquired_on)));
+    end
+
+    % ---- 1) Site-based (Spe/Radnor) ----
+    OutptBySite = table('Size',[0 2], ...
+                         'VariableTypes',{'double','double'}, ...
+                         'VariableNames',{'Patient','Session'});
+    if hasAcqCol
+        isOutpt_site = ~ismissing(acqStr_report) & ...
+                       (contains(acqStr_report,"spe") | contains(acqStr_report,"radnor"));
+        if any(isOutpt_site)
+            OutptBySite = unique(R(isOutpt_site, {'patient_id','session_number'}));
+            OutptBySite.Properties.VariableNames = {'Patient','Session'};
+            if ~isnumeric(OutptBySite.Patient)
+                OutptBySite.Patient = double(str2double(string(OutptBySite.Patient)));
+            end
+            if ~isnumeric(OutptBySite.Session)
+                OutptBySite.Session = double(str2double(string(OutptBySite.Session)));
+            end
         end
-        if hasClass
-            keepCols{end+1} = 'report_patient_class';
-            rightVars{end+1} = 'report_patient_class';
+        fprintf('[Outpatient rule] Site-based (Spe/Radnor) outpatients: %d sessions.\n', ...
+            height(OutptBySite));
+    else
+        warning('No acquired_on column: cannot use Spe/Radnor site rule.');
+    end
+
+    % ---- 2) report_PATIENT_CLASS == "Outpatient" ----
+    OutptByClass = table('Size',[0 2], ...
+                         'VariableTypes',{'double','double'}, ...
+                         'VariableNames',{'Patient','Session'});
+    classStr = lower(strtrim(string(R.report_PATIENT_CLASS)));
+    isOutpt_class = (classStr == "outpatient");
+    if any(isOutpt_class)
+        OutptByClass = unique(R(isOutpt_class, {'patient_id','session_number'}));
+        OutptByClass.Properties.VariableNames = {'Patient','Session'};
+        if ~isnumeric(OutptByClass.Patient)
+            OutptByClass.Patient = double(str2double(string(OutptByClass.Patient)));
         end
-
-        RJ = R(:, keepCols);
-        SJ = innerjoin(S, RJ, ...
-            'LeftKeys',  {'Patient','Session'}, ...
-            'RightKeys', {'patient_id','session_number'}, ...
-            'RightVariables', rightVars);
-
-        % Outpatient rule:
-        %   (acquired_on contains "spe"/"radnor") OR (report_patient_class == "Outpatient")
-        nSJ = height(SJ);
-        isSpeRad   = false(nSJ,1);
-        isOutClass = false(nSJ,1);
-
-        if hasAcq
-            acq = strtrim(lower(string(SJ.acquired_on)));
-            isSpeRad = ~ismissing(acq) & contains_any_token_(acq, outpt_tokens);
-        end
-        if hasClass
-            cls = strtrim(lower(string(SJ.report_patient_class)));
-            isOutClass = ~ismissing(cls) & strcmp(cls, 'outpatient');
-        end
-
-        keep_out = isSpeRad | isOutClass;
-        SJ = SJ(keep_out, :);
-
-        if isempty(SJ)
-            warning('Outpatient filter removed all EEGs; continuing with empty S.');
-            S = S([],:);  % will bail later when no pairs
-        else
-            % Keep original S variables, plus SpikeRate_perHour and outpatient info if present
-            keepVars = intersect(S.Properties.VariableNames, SJ.Properties.VariableNames, 'stable');
-            keepVars = unique([keepVars, {'SpikeRate_perHour'} , rightVars], 'stable');
-            S = SJ(:, keepVars);
+        if ~isnumeric(OutptByClass.Session)
+            OutptByClass.Session = double(str2double(string(OutptByClass.Session)));
         end
     end
+    fprintf('[Outpatient rule] report_PATIENT_CLASS=="Outpatient": %d sessions.\n', ...
+        height(OutptByClass));
+
+    % ---- 3) jay_in_or_out == "out" ----
+    OutptByJay = table('Size',[0 2], ...
+                       'VariableTypes',{'double','double'}, ...
+                       'VariableNames',{'Patient','Session'});
+    jayStr = lower(strtrim(string(R.jay_in_or_out)));
+    isOutpt_jay = (jayStr == "out");
+    if any(isOutpt_jay)
+        OutptByJay = unique(R(isOutpt_jay, {'patient_id','session_number'}));
+        OutptByJay.Properties.VariableNames = {'Patient','Session'};
+        if ~isnumeric(OutptByJay.Patient)
+            OutptByJay.Patient = double(str2double(string(OutptByJay.Patient)));
+        end
+        if ~isnumeric(OutptByJay.Session)
+            OutptByJay.Session = double(str2double(string(OutptByJay.Session)));
+        end
+    end
+    fprintf('[Outpatient rule] jay_in_or_out=="out": %d sessions.\n', ...
+        height(OutptByJay));
+
+    % ---- 4) union of all three ----
+    OutptKeys = [OutptBySite; OutptByClass; OutptByJay];
+    if ~isempty(OutptKeys)
+        OutptKeys = unique(OutptKeys);
+    else
+        error(['No outpatient sessions identified from any rule:\n' ...
+               '  Spe/Radnor site, report_PATIENT_CLASS=="Outpatient", or jay_in_or_out=="out".']);
+    end
+
+    % ---- 5) apply filter to S and R ----
+    S = innerjoin(S, OutptKeys, 'Keys', {'Patient','Session'});
+    R = innerjoin(R, OutptKeys, ...
+        'LeftKeys', {'patient_id','session_number'}, ...
+        'RightKeys', {'Patient','Session'});
+
+    fprintf(['\n[Outpatient filter] Outpatients defined as ANY of:\n' ...
+         '  - acquired_on containing "Spe" or "Radnor" (case-insensitive) OR\n' ...
+         '  - report_PATIENT_CLASS == "Outpatient" OR\n' ...
+         '  - jay_in_or_out == "out"\n']);
+    fprintf('[Outpatient filter] Kept %d spike rows and %d report rows.\n', ...
+        height(S), height(R));
+end
+
+if isempty(S)
+    warning('No EEGs left after filters; exiting.');
+    return;
 end
 
 %% ================= JOIN + MATCH (asymmetric windows) =================
-rightVars = {'EEG_Date','VisitDates','HasSzVec','epilepsy_type','epilepsy_specific'};
-if hasAcq,   rightVars{end+1} = 'acquired_on'; end
-if hasClass, rightVars{end+1} = 'report_patient_class'; end
+rightVars = {'EEG_Date','VisitDates','HasSzVec','epilepsy_type'};
+if ~ismember('acquired_on',          R.Properties.VariableNames), R.acquired_on = strings(height(R),1); end
+if ~ismember('report_PATIENT_CLASS', R.Properties.VariableNames), R.report_PATIENT_CLASS = strings(height(R),1); end
+rightVars{end+1} = 'acquired_on';
+rightVars{end+1} = 'report_PATIENT_CLASS';
 
 JR = innerjoin(S, R, ...
     'LeftKeys',{'Patient','Session'}, ...
     'RightKeys',{'patient_id','session_number'}, ...
     'RightVariables', rightVars);
 
-% If 'acquired_on' absent, create placeholder for audit
-if ~ismember('acquired_on', JR.Properties.VariableNames)
-    JR.acquired_on = strings(height(JR),1);
-end
-if ~ismember('report_patient_class', JR.Properties.VariableNames)
-    JR.report_patient_class = strings(height(JR),1);
-end
-
 % Keep rows with valid EEG date and at least one visit date
 JR = JR(~isnat(JR.EEG_Date) & cellfun(@(v)~isempty(v) & any(~isnat(v)), JR.VisitDates), :);
 
-% Fast map for display type bucket (optional)
-type3Map = containers.Map(double(PerPat.Patient), cellstr(PerPat.EpiType3));
-
-pairs = table('Size',[0 13], ...
-    'VariableTypes', {'double','double','string','datetime','double','datetime','double','double','string','string','double','double','string'}, ...
+pairs = table('Size',[0 9], ...
+    'VariableTypes', {'double','double','string','datetime','double','datetime','double','double','string'}, ...
     'VariableNames', {'Patient','Session','EEG_Name','EEG_Date','SpikeRate_perHour', ...
-                      'Visit_Date','HasSz','GapDays_abs','EpilepsyType','EpiType3', ...
-                      'Meanable0','Meanable1','Segment'});
+                      'Visit_Date','HasSz','GapDays_abs','EpilepsyType'});
 
 for i = 1:height(JR)
     eegDate = JR.EEG_Date(i);
@@ -270,16 +312,15 @@ for i = 1:height(JR)
         continue
     end
 
-    % annotate display bucket (may be "Other")
-    e3 = ""; if isKey(type3Map, pid), e3 = string(type3Map(pid)); end
-
     pairs = [pairs; {pid, JR.Session(i), JR.EEG_Name(i), eegDate, JR.SpikeRate_perHour(i), ...
-                     vdates(j), double(thisHas), abs(dSigned(j)), string(JR.epilepsy_type(i)), e3, NaN, NaN, segLabel}]; %#ok<AGROW>
+                     vdates(j), double(thisHas), abs(dSigned(j)), string(JR.epilepsy_type(i))}]; %#ok<AGROW>
 end
 
 fprintf('Matched %d EEG–visit pairs under [%d days pre, %d days post].\n', height(pairs), preGapDays, postGapDays);
 if isempty(pairs)
-    warning('No pairs constructed.'); if saveAudit, writetable(pairs, pairsOut); end; return
+    warning('No pairs constructed.'); 
+    if saveAudit, writetable(pairs, pairsOut); end
+    return;
 end
 
 % Require ≥2 pairs per patient
@@ -287,97 +328,91 @@ gc = groupcounts(pairs,'Patient');
 keepP2 = gc.Patient(gc.GroupCount>=2);
 pairs = pairs(ismember(pairs.Patient, keepP2), :);
 if isempty(pairs)
-    warning('Nothing left after ≥2-pair filter.'); if saveAudit, writetable(pairs, pairsOut); end; return
+    warning('Nothing left after ≥2-pair filter.');
+    if saveAudit, writetable(pairs, pairsOut); end
+    return;
 end
 
 %% ================= Per-patient MEANS: HasSz==0 vs HasSz==1 =================
-if useLogTransform
-    pairs.SpikeResp = log1p(pairs.SpikeRate_perHour);
-    yLabel = 'log(1 + spike rate, spikes/hour)';
-else
-    pairs.SpikeResp = pairs.SpikeRate_perHour;
-    yLabel = 'spike rate (spikes/hour)';
+% RAW spike rates (spikes/hour) for stats,
+% log10(spikes/hour) for plotting.
+
+[G, pid] = findgroups(double(pairs.Patient));
+
+mu0_raw = splitapply(@(y,hs) mean(y(hs==0), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G);
+mu1_raw = splitapply(@(y,hs) mean(y(hs==1), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G);
+n0      = splitapply(@(hs) sum(hs==0),       pairs.HasSz, G);
+n1      = splitapply(@(hs) sum(hs==1),       pairs.HasSz, G);
+
+keep = isfinite(mu0_raw) & isfinite(mu1_raw) & (n0>0) & (n1>0);
+yNoSz_raw     = mu0_raw(keep);       % HasSz==0 mean spike rate (spikes/hour)
+ySz_raw       = mu1_raw(keep);       % HasSz==1 mean spike rate (spikes/hour)
+patients_kept = pid(keep);
+
+Npairs = numel(ySz_raw);
+
+if Npairs < 3
+    warning('Fewer than 3 patients with both HasSz==0 and HasSz==1; no stats/plot.');
+    if saveAudit, writetable(pairs, pairsOut); end
+    return;
 end
 
-% Overall includes ALL valid patients (including "Other")
-sets = struct();
-sets.Overall  = pairs;
-sets.General  = pairs(pairs.EpiType3=="General",:);
-sets.Temporal = pairs(pairs.EpiType3=="Temporal",:);
-sets.Frontal  = pairs(pairs.EpiType3=="Frontal",:);
+% Wilcoxon on RAW spike rates
+diffs_raw   = ySz_raw - yNoSz_raw;
+p_signrank  = signrank(ySz_raw, yNoSz_raw, 'method','approx');
+medDeltaRaw = median(diffs_raw, 'omitnan');
+med0        = median(yNoSz_raw, 'omitnan');
+med1        = median(ySz_raw,   'omitnan');
 
-order = {'Overall','General','Temporal','Frontal'};
-pvals = nan(4,1); Npairs = nan(4,1); medDelta = nan(4,1);
+% For plotting: log10(spikes/hour) with EPS_PLOT guard
+logNoSz = log10(max(yNoSz_raw, EPS_PLOT));
+logSz   = log10(max(ySz_raw,   EPS_PLOT));
 
-figure('Color','w'); tiledlayout(2,2,'TileSpacing','compact','Padding','compact');
+%% ================= Plot (log10 spike rate in spikes/min) =================
 
-for g = 1:4
-    name = order{g};
-    T = sets.(name);
-    if isempty(T)
-        nexttile; axis off; title(sprintf('%s — %s', name, segLabel));
-        continue
-    end
+% Convert RAW means (spikes/hour) → spikes/min
+yNoSz_perMin = yNoSz_raw / 60;
+ySz_perMin   = ySz_raw   / 60;
 
-    [G, pid] = findgroups(double(T.Patient));
-    mu0 = splitapply(@(y,hs) mean(y(hs==0), 'omitnan'), T.SpikeResp, T.HasSz, G);
-    mu1 = splitapply(@(y,hs) mean(y(hs==1), 'omitnan'), T.SpikeResp, T.HasSz, G);
-    n0  = splitapply(@(hs) sum(hs==0), T.HasSz, G);
-    n1  = splitapply(@(hs) sum(hs==1), T.HasSz, G);
+% For plotting: log10(spikes/min) with EPS guard
+logNoSz = log10(max(yNoSz_perMin, EPS_PLOT/60));  % convert EPS_PLOT to per-minute scale
+logSz   = log10(max(ySz_perMin,   EPS_PLOT/60));
 
-    keep = isfinite(mu0) & isfinite(mu1) & (n0>0) & (n1>0);
-    yNoSz = mu0(keep);
-    ySz   = mu1(keep);
+jitterWidth = 0.08;   % adjust as needed (0.05–0.12 looks good)
 
-    Npairs(g) = numel(ySz);
+% Jittered x-positions for points (but NOT for lines)
+x0_jit = -jitterWidth/2 + jitterWidth*rand(Npairs,1);      % around 0
+x1_jit =  1 - jitterWidth/2 + jitterWidth*rand(Npairs,1);  % around 1
 
-    nexttile; hold on; grid on; box off; set(gca,'FontSize',14);
-    if Npairs(g) >= 3
-        diffs = ySz - yNoSz;
-        p = signrank(ySz, yNoSz, 'method','approx');
-        pvals(g) = p;
-        medDelta(g) = median(diffs,'omitnan');
+figure('Color','w','Position',[200 200 750 580]);
+hold on; grid on; box off; set(gca,'FontSize',16);
 
-        % spaghetti plot
-        for i = 1:Npairs(g)
-            plot([0 1],[yNoSz(i) ySz(i)],'-','Color',[0.7 0.7 0.7])
-        end
-        scatter(zeros(Npairs(g),1), yNoSz, 28, 'filled')
-        scatter(ones(Npairs(g),1),  ySz,   28, 'filled')
-        xlim([-0.25 1.25]); set(gca,'XTick',[0 1],'XTickLabel',{'HasSz=0 mean','HasSz=1 mean'})
-        ylabel(yLabel);
-        title(sprintf('%s — %s', name, segLabel));
-
-        if useLogTransform
-            pct = 100*(exp(medDelta(g)) - 1);
-            subtitle(sprintf('n=%d  median Δ=%.3f (%+0.0f%%)  p=%.3g', Npairs(g), medDelta(g), pct, pvals(g)));
-        else
-            subtitle(sprintf('n=%d  median Δ=%.3f  p=%.3g', Npairs(g), medDelta(g), pvals(g)));
-        end
-    else
-        title(sprintf('%s — %s', name, segLabel));
-        text(0.5,0.5,'Insufficient patients with both states','HorizontalAlignment','center'); axis off
-    end
+% --- Paired lines (NO jitter) ---
+for i = 1:Npairs
+    plot([0 1], [logNoSz(i) logSz(i)], '-', 'Color',[0.7 0.7 0.7]);
 end
 
-% Bonferroni across the 4 panels we display
-pvals_bonf = min(pvals * 4, 1);
-fprintf('\nPaired sign-rank on per-patient means (HasSz=1 minus HasSz=0) — %s:\n', segLabel);
-for g = 1:4
-    nm = order{g};
-    if ~isnan(pvals(g))
-        if useLogTransform
-            pct = 100*(exp(medDelta(g)) - 1);
-            fprintf('  %-9s  n=%-3d  median Δ=%.3f (%+0.0f%%)  p=%.3g  p_bonf=%.3g\n', ...
-                nm, Npairs(g), medDelta(g), pct, pvals(g), pvals_bonf(g));
-        else
-            fprintf('  %-9s  n=%-3d  median Δ=%.3f          p=%.3g  p_bonf=%.3g\n', ...
-                nm, Npairs(g), medDelta(g), pvals(g), pvals_bonf(g));
-        end
-    else
-        fprintf('  %-9s  insufficient pairs\n', nm);
-    end
-end
+% --- Jittered scatter points ---
+scatter(x0_jit, logNoSz, 50, 'filled', 'MarkerFaceAlpha',0.8);
+scatter(x1_jit, logSz,   50, 'filled', 'MarkerFaceAlpha',0.8);
+
+% Aesthetics
+xlim([-0.25 1.25]);
+set(gca,'XTick',[0 1], 'XTickLabel',{'HasSz=0 mean','HasSz=1 mean'});
+ylabel('log_{10} spike rate (spikes/min)');
+title(sprintf('All epilepsy patients — %s', segLabel), 'FontSize',18,'FontWeight','bold');
+
+subtitle(sprintf('n=%d  median HasSz=0=%.3f/hr, HasSz=1=%.3f/hr, median Δ=%.3f/hr,  p=%.3g', ...
+    Npairs, med0, med1, medDeltaRaw, p_signrank));
+
+
+%% ================= Console summary =================
+fprintf('\nPaired sign-rank on per-patient mean spike rates (HasSz=1 minus HasSz=0) — %s:\n', segLabel);
+fprintf('  n patients with both states = %d\n', Npairs);
+fprintf('  Median HasSz=0 mean spike rate      = %.3f spikes/hour\n', med0);
+fprintf('  Median HasSz=1 mean spike rate      = %.3f spikes/hour\n', med1);
+fprintf('  Median difference (HasSz=1 - HasSz=0) = %.3f spikes/hour\n', medDeltaRaw);
+fprintf('  Wilcoxon sign-rank p = %.3g\n', p_signrank);
 
 %% =================== Save audit (optional) ===================
 if saveAudit
@@ -386,15 +421,8 @@ if saveAudit
 end
 end % main
 
-%% =================== HELPERS ===================
-function tf = contains_any_token_(strs, tokens)
-% strs: string array; tokens: string array, already lowercase
-tf = false(size(strs));
-for t = 1:numel(tokens)
-    tf = tf | contains(strs, tokens(t));
-end
-end
 
+%% =================== HELPER ===================
 function PerPat = derive_patient_types_(R)
 % Returns table with Patient, EpilepsyType, EpiType3 (General/Temporal/Frontal/Other)
 pid   = double(R.patient_id);
@@ -408,7 +436,7 @@ T = sortrows(T, 'Patient');
 PerPat = T(ia, {'Patient','EpilepsyType','EpilepsySpecific'});
 PerPat.Patient = double(PerPat.Patient);
 
-% bucket to display types (used only for subpanels; NOT for inclusion)
+% bucket to display types (not used in this simplified analysis, but kept for compatibility)
 etLower = lower(strtrim(PerPat.EpilepsyType));
 esLower = lower(strtrim(PerPat.EpilepsySpecific));
 isGen   = contains(etLower, 'general');

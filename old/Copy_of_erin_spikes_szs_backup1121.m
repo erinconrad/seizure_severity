@@ -14,7 +14,7 @@ only_amb    = 2;   % 1 = ONLY ambulatory (>=12h); 2 = ONLY routine (<=12h); 0 = 
 only_outpt  = 1;   % 1 = keep only outpatient EEGs (as defined above)
 
 % Logic for has sz
-hassz_replace = 1; % if 1, then make visits where has Sz == 0 be 0 sz frequency
+hassz_replace = 1; % if 1, then make visits where has Sz == 0 be 0 sz frequency  - this definitely improves stats
 
 % Label constants
 NESD_LABEL = "Non-Epileptic Seizure Disorder";
@@ -594,6 +594,13 @@ if ~isempty(resultsCsv)
     fprintf('Saved results to: %s\n', resultsCsv);
 end
 
+%% ======================= FIGURE 3: 2x2 PRESENCE TABLE & CHI-SQUARE =======================
+make_spike_sz_presence_chi2(PatientSpikeSz_All);
+
+%% ======================= FIGURE 4: SPEARMAN — NON-ZERO ONLY =======================
+fig4_out = '../figures/spearman_spikerate_szfreq_log10_nonzero.png';
+make_spearman_nonzero_fig(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
+    canonical3, spearman_xLims, spearman_yLims, fig4_out);
 
 
 %% ======================= HELPER FUNCTIONS ===================================
@@ -982,4 +989,221 @@ tick = 0.03 * diff(ax.YLim);
 plot(ax, [x1 x1 x2 x2], [y- tick, y, y, y- tick], 'k-', 'LineWidth', 1.3);
 text(ax, mean([x1 x2]), y + 0.02*diff(ax.YLim), ptext, ...
     'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',20);
+end
+
+function make_spike_sz_presence_chi2(PatientSpikeSz_All)
+% make_spike_sz_presence_chi2
+%   Builds a 2x2 contingency table for:
+%       spikes present = MeanSpikeRate_perMin > 0
+%       seizures present = MeanSzFreq > 0
+%   Runs chi-square test of independence and shows a figure + console stats.
+
+rate = PatientSpikeSz_All.MeanSpikeRate_perMin;
+freq = PatientSpikeSz_All.MeanSzFreq;
+
+valid = isfinite(rate) & isfinite(freq);
+rate = rate(valid);
+freq = freq(valid);
+
+hasSpikes = rate > 0;
+hasSz     = freq > 0;
+
+x = categorical(hasSpikes, [false true], {'No spikes','Spikes>0'});
+y = categorical(hasSz,     [false true], {'No seizures','Seizures>0'});
+
+[tbl, chi2, p, ~] = crosstab(x, y);
+
+% Console output
+fprintf('\n=== 2x2 presence table: spikes>0 vs seizures>0 (patient-level) ===\n');
+rowNames = {'NoSpikes','SpikesGT0'};
+colNames = {'NoSeizures','SeizuresGT0'};
+disp(array2table(tbl, 'RowNames', rowNames, 'VariableNames', colNames));
+df = (size(tbl,1)-1) * (size(tbl,2)-1);
+fprintf('Chi-square(%d) = %.3f, p = %.3g\n', df, chi2, p);
+
+% Figure
+f = figure('Color','w','Position',[200 200 480 420]);
+imagesc(tbl);
+colorbar;
+axis equal tight;
+set(gca,'XTick',1:2,'XTickLabel',colNames, ...
+        'YTick',1:2,'YTickLabel',rowNames, ...
+        'FontSize',14);
+xlabel('Seizures (MeanSzFreq>0)');
+ylabel('Spikes (MeanSpikeRate>0)');
+title(sprintf('Spikes>0 vs Seizures>0  (\\chi^2=%.2f, p=%.3g)', chi2, p), ...
+      'FontSize',16,'FontWeight','bold');
+
+% overlay counts
+for i = 1:2
+    for j = 1:2
+        text(j, i, sprintf('%d', tbl(i,j)), ...
+            'HorizontalAlignment','center', ...
+            'VerticalAlignment','middle', ...
+            'FontSize',16,'FontWeight','bold','Color','k');
+    end
+end
+
+end
+
+function make_spearman_nonzero_fig(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
+                                   canonical3, xLims, yLims, outPng)
+% make_spearman_nonzero_fig
+%   Repeats the spike-vs-seizure Spearman correlations using ONLY
+%   patients with non-zero spikes and non-zero seizures.
+%
+%   Uses log10(MeanSzFreq) vs log10(MeanSpikeRate_perMin)
+%   Panels: A = all epilepsy, B/C/D = Frontal / Temporal / General.
+
+fontL = 20;
+
+% Ensure canonical3 is a cell array of char for categorical()
+if isstring(canonical3)
+    canonical3 = cellstr(canonical3);
+end
+
+%% --- Overall (all epilepsy) ---
+rate_all = PatientSpikeSz_All.MeanSpikeRate_perMin;
+freq_all = PatientSpikeSz_All.MeanSzFreq;
+
+mask_all = isfinite(rate_all) & isfinite(freq_all) & ...
+           (rate_all > 0) & (freq_all > 0);
+
+x_all = log10(freq_all(mask_all));
+y_all = log10(rate_all(mask_all));
+n_all = numel(x_all);
+
+if n_all >= 3
+    [rs_all, p_all] = corr(x_all, y_all, 'Type','Spearman','Rows','complete');
+else
+    rs_all = NaN; p_all = NaN;
+end
+
+%% --- By group (EpiType3) with non-zero only ---
+rowsOut = {};
+for g = canonical3
+    % g is a cellstr element; convert to char for comparison
+    gStr = char(g);
+
+    m = strcmp(string(PatientSpikeSz_Typed.EpiType3), gStr) & ...
+        isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perMin) & ...
+        isfinite(PatientSpikeSz_Typed.MeanSzFreq) & ...
+        (PatientSpikeSz_Typed.MeanSpikeRate_perMin > 0) & ...
+        (PatientSpikeSz_Typed.MeanSzFreq > 0);
+
+    x = log10(PatientSpikeSz_Typed.MeanSzFreq(m));
+    y = log10(PatientSpikeSz_Typed.MeanSpikeRate_perMin(m));
+    n = numel(x);
+    if n >= 3
+        [rs, p] = corr(x, y, 'Type','Spearman','Rows','complete');
+    else
+        rs = NaN; p = NaN;
+    end
+    rowsOut(end+1,:) = {gStr, n, rs, p}; %#ok<SAGROW>
+end
+SpearmanResults_nz = cell2table(rowsOut, 'VariableNames', {'Group','N','Spearman_r','p_raw'});
+k = height(SpearmanResults_nz);
+SpearmanResults_nz.p_bonf = min(SpearmanResults_nz.p_raw * k, 1);
+
+% Console summary
+fprintf('\n=== Spearman (NON-ZERO ONLY): log10(spikes/min) vs log10(seizures/month) ===\n');
+disp([table("Overall (all epilepsy, non-zero only)", n_all, rs_all, p_all, NaN, ...
+      'VariableNames', {'Group','N','Spearman_r','p_raw','p_bonf'}); SpearmanResults_nz])
+
+%% --- Build typed table for plotting ---
+mask_typed = isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perMin) & ...
+             isfinite(PatientSpikeSz_Typed.MeanSzFreq) & ...
+             (PatientSpikeSz_Typed.MeanSpikeRate_perMin > 0) & ...
+             (PatientSpikeSz_Typed.MeanSzFreq > 0) & ...
+             ~ismissing(PatientSpikeSz_Typed.EpiType3);
+
+T = table;
+T.EpiType3     = categorical(string(PatientSpikeSz_Typed.EpiType3(mask_typed)), canonical3);
+T.logSpikeRate = log10(PatientSpikeSz_Typed.MeanSpikeRate_perMin(mask_typed));
+T.logSzFreq    = log10(PatientSpikeSz_Typed.MeanSzFreq(mask_typed));
+
+presentCats = categories(removecats(T.EpiType3));
+
+%% --- Draw figure ---
+f = figure('Color','w','Position',[60 60 1200 900]);
+tiledlayout(f,2,2,'Padding','compact','TileSpacing','compact');
+
+% A. Overall
+axA = nexttile(1); hold(axA,'on'); grid(axA,'on'); box(axA,'off');
+scatter(axA, x_all, y_all, 18, [0.3 0.3 0.3], ...
+    'filled','MarkerFaceAlpha',0.35);
+if n_all >= 3
+    X = [ones(n_all,1), x_all(:)];
+    b = X \ y_all(:);
+    xgrid = linspace(xLims(1), xLims(2), 300)';
+    plot(axA, xgrid, b(1) + b(2)*xgrid, 'k-', 'LineWidth', 2);
+end
+xlim(axA, xLims); ylim(axA, yLims);
+xlabel(axA,'log_{10} Seizures per month','FontSize',fontL);
+ylabel(axA,'log_{10} Spikes per minute','FontSize',fontL);
+title(axA, sprintf('A. All epilepsy (N=%d, non-zero only)', n_all), ...
+    'FontSize',fontL,'FontWeight','bold');
+txtA = sprintf('Spearman r=%.3f, p=%.3g', rs_all, p_all);
+text(axA, 0.98, 0.95, txtA, 'Units','normalized', ...
+     'HorizontalAlignment','right','VerticalAlignment','top', ...
+     'FontSize',fontL-2,'FontWeight','bold');
+set(axA,'FontSize',fontL);
+
+% B/C/D panels: Frontal, Temporal, General
+panelOrder = {'Frontal','Temporal','General'};
+panelTitle = {'B. Frontal','C. Temporal','D. General'};
+cols = lines(3);
+
+for p = 1:3
+    ax = nexttile(p+1); hold(ax,'on'); grid(ax,'on'); box(ax,'off');
+
+    if ~ismember(panelOrder{p}, presentCats)
+        axis(ax,'off');
+        continue;
+    end
+
+    % One-category categorical target
+    tgt = categorical(panelOrder(p), canonical3);
+    m   = (T.EpiType3 == tgt);
+    xg  = T.logSzFreq(m);
+    yg  = T.logSpikeRate(m);
+    nNow = numel(xg);
+
+    if nNow == 0
+        axis(ax,'off');
+        continue;
+    end
+
+    col = cols(min(p,size(cols,1)),:);
+    scatter(ax, xg, yg, 24, col, 'filled','MarkerFaceAlpha',0.4);
+
+    if nNow >= 3
+        Xg = [ones(nNow,1), xg(:)];
+        bg = Xg \ yg(:);
+        xgrid = linspace(xLims(1), xLims(2), 250)';
+        plot(ax, xgrid, bg(1) + bg(2)*xgrid, '-', 'Color', col, 'LineWidth', 2);
+    end
+
+    xlim(ax, xLims); ylim(ax, yLims);
+    row = SpearmanResults_nz(strcmp(SpearmanResults_nz.Group, panelOrder{p}), :);
+    if ~isempty(row) && row.N >= 3 && isfinite(row.Spearman_r)
+        txt = sprintf('Spearman r=%.3f, p_{bonf}=%.3g', row.Spearman_r, row.p_bonf);
+    else
+        txt = 'Insufficient data';
+    end
+
+    title(ax, sprintf('%s (N=%d, non-zero only)', panelTitle{p}, nNow), ...
+        'FontSize',fontL,'FontWeight','bold');
+    text(ax, 0.98, 0.95, txt, 'Units','normalized', ...
+         'HorizontalAlignment','right','VerticalAlignment','top', ...
+         'FontSize',fontL-3,'FontWeight','bold');
+    set(ax,'FontSize',fontL);
+end
+
+if nargin >= 6 && ~isempty(outPng)
+    if ~exist(fileparts(outPng),'dir'), mkdir(fileparts(outPng)); end
+    exportgraphics(f, outPng, 'Resolution', 300);
+    fprintf('Saved Fig (Spearman non-zero only): %s\n', outPng);
+end
+
 end
