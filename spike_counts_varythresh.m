@@ -8,18 +8,27 @@ WIN_SEC   = 1.0;
 WIN_SAMP  = round(WIN_SEC * FS);
 HALF_WIN  = floor(WIN_SAMP/2);
 
-% Thresholds: 0.05, 0.10, ..., 0.95
-threshList = 0.05:0.05:0.95;
-nThresh    = numel(threshList);
+%% ===== Threshold list =====
+% Base thresholds: 0.05, 0.10, ..., 0.95
+baseThresh = 0.05:0.05:0.95;
 
-% Make valid MATLAB variable names for the thresholds:
-% e.g., 0.05 -> 'count_0_05', 0.10 -> 'count_0_10'
+% Add the original threshold explicitly
+extraThresh = 0.43;
+
+% Combine and ensure unique, sorted list
+threshList = unique([baseThresh, extraThresh]);
+
+% Number of thresholds
+nThresh = numel(threshList);
+
+% Create valid MATLAB variable names
 threshVarNames = strings(1, nThresh);
 for iT = 1:nThresh
-    thrStr = sprintf('%.2f', threshList(iT));   % '0.05'
-    thrStr(thrStr == '.') = '_';               % '0_05'
-    threshVarNames(iT) = "count_" + thrStr;    % 'count_0_05'
+    thrStr = sprintf('%.2f', threshList(iT));   % e.g. '0.43'
+    thrStr(thrStr == '.') = '_';               % becomes '0_43'
+    threshVarNames(iT) = "count_" + thrStr;    % 'count_0_43'
 end
+
 
 %% ===== Find all probability CSVs (two patterns) =====
 f1 = dir(fullfile(mainDir, 'sub-Penn*', 'ses-*', 'sub-Penn*_ses-*_task-EEG_eeg_*.csv'));
