@@ -106,7 +106,7 @@ else
 end
 
 %% ===== Process each CSV =====
-for k = 1:20%numel(files)
+for k = 1:numel(files)
     fpath  = fullfile(files(k).folder, files(k).name);
     fname  = files(k).name;
 
