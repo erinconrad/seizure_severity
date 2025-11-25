@@ -1,12 +1,3 @@
-%{
-To dos
-- run the replacement approach by colin
-- check the rest of the code
-- decide on how to visually present data
-- figure out SN2 prob threshold - 0.46???
-- add jitter to y-axis for zero spikes
-%}
-
 %% ======================= CONFIG =======================
 % Paths
 spikeSummaryCsv   = '../data/SN_counts/spike_counts_summary.csv';
@@ -24,7 +15,7 @@ only_amb    = 2;   % 1 = ONLY ambulatory (>=12h); 2 = ONLY routine (<=12h); 0 = 
 only_outpt  = 1;   % 1 = keep only outpatient EEGs (as defined above)
 
 % Logic for has sz
-hassz_replace = 1; % if 1, then make visits where has Sz == 0 be 0 sz frequency & assume Has Sz == 1 -> 1 sz since last visit
+hassz_replace = 1; % if 1, then make visits where has Sz == 0 be 0 sz frequency  - this definitely improves stats
 
 % Label constants
 NESD_LABEL = "Non-Epileptic Seizure Disorder";
@@ -186,76 +177,7 @@ if only_outpt == 1
                '  Spe/Radnor site, report_PATIENT_CLASS=="Outpatient", or jay_in_or_out=="out".']);
     end
 
-    % ---------- NEW: SUMMARY COUNTS (patients / EEGs) BEFORE FILTER ----------
-    % 1) Total patients (no filtering)
-    allPatients_all = unique(double(ReportTable.patient_id));
-    allPatients_all = allPatients_all(isfinite(allPatients_all));
-    n_pat_total = numel(allPatients_all);
-
-    % 2) Patients with epilepsy (no filtering)
-    [PatientTypingAll_full, ~] = build_patient_metrics_from_report(ReportTable, canonical3, hassz_replace);
-    et_full = lower(strtrim(string(PatientTypingAll_full.EpilepsyType)));
-    isEmpty_full = ismissing(PatientTypingAll_full.EpilepsyType) | ...
-                   strlength(strtrim(string(PatientTypingAll_full.EpilepsyType)))==0;
-    isNESD_full  = et_full == lower(strtrim(NESD_LABEL));
-    isBad_full   = isNESD_full | ismember(et_full, badTypes) | isEmpty_full;
-    epiPatients_full = unique(double(PatientTypingAll_full.Patient(~isBad_full)));
-    epiPatients_full = epiPatients_full(isfinite(epiPatients_full));
-    n_pat_epilepsy = numel(epiPatients_full);
-
-    % 3–6) Outpatient routine EEGs and corresponding patients
-    % Save a copy of the unfiltered sessions for counting
-    SpikeSummaryTable_all = SpikeSummaryTable;
-    SpikeSummaryTable_FULL = SpikeSummaryTable;
-
-    % Join outpatient keys to all sessions, then restrict to routine (<= 12h)
-    SessForCounts = innerjoin(SpikeSummaryTable_all(:,{'Patient','Session','Duration_sec'}), ...
-                              OutptKeys, 'Keys', {'Patient','Session'});
-    isRoutine = SessForCounts.Duration_sec <= 12*3600;
-    OutptRoutine = SessForCounts(isRoutine, :);
-
-    % (3) Patients with ≥1 outpatient routine EEG
-    pats_outpt_routine = unique(OutptRoutine.Patient);
-    pats_outpt_routine = pats_outpt_routine(isfinite(pats_outpt_routine));
-    n_pats_outpt_routine = numel(pats_outpt_routine);
-
-    % (4) Epilepsy patients with ≥1 outpatient routine EEG
-    pats_epi_outpt_routine = intersect(pats_outpt_routine, epiPatients_full);
-    n_pats_epi_outpt_routine = numel(pats_epi_outpt_routine);
-
-    % (5) Outpatient routine EEGs total
-    n_eegs_outpt_routine = height(OutptRoutine);
-
-    % (6) Outpatient routine EEGs from epilepsy patients
-    OutptRoutine_epi = OutptRoutine(ismember(OutptRoutine.Patient, epiPatients_full), :);
-    n_eegs_epi_outpt_routine = height(OutptRoutine_epi);
-
-    % Pack into a table
-    SummaryCounts = table( ...
-        [ "Total patients (all)"; ...
-          "Patients with epilepsy"; ...
-          "Patients with ≥1 outpatient routine EEG"; ...
-          "Epilepsy patients with ≥1 outpatient routine EEG"; ...
-          "Outpatient routine EEGs (all)"; ...
-          "Outpatient routine EEGs (epilepsy patients)" ], ...
-        [ n_pat_total; ...
-          n_pat_epilepsy; ...
-          n_pats_outpt_routine; ...
-          n_pats_epi_outpt_routine; ...
-          n_eegs_outpt_routine; ...
-          n_eegs_epi_outpt_routine ], ...
-        'VariableNames', {'Metric','Count'});
-
-    fprintf('\n=== Summary patient/EEG counts (no filtering vs outpatient routine) ===\n');
-    disp(SummaryCounts);
-
-    % (Optional) save to CSV
-    summaryOutCsv = '../output/patient_eeg_counts_summary.csv';
-    if ~exist(fileparts(summaryOutCsv),'dir'), mkdir(fileparts(summaryOutCsv)); end
-    writetable(SummaryCounts, summaryOutCsv);
-    fprintf('Saved summary counts to: %s\n', summaryOutCsv);
-
-    % ---------- 5) Apply filter to spike summary + report (as before) ----------
+    % ---------- 5) Apply filter to spike summary + report ----------
     SpikeSummaryTable = innerjoin(SpikeSummaryTable, OutptKeys, 'Keys', {'Patient','Session'});
     ReportTable = innerjoin(ReportTable, OutptKeys, ...
         'LeftKeys', {'patient_id','session_number'}, ...
@@ -270,18 +192,14 @@ if only_outpt == 1
 end  % only_outpt == 1
 
 
+% Keep a FULL (already outpatient-restricted if chosen) copy for modality comparisons
+SpikeSummaryTable_FULL = SpikeSummaryTable;
+
+
 %% ======================= BUILD PATIENT-LEVEL METRICS ONCE =======================
 [PatientTypingAll, SzFreqPerPatient] = build_patient_metrics_from_report(ReportTable, canonical3,hassz_replace); % looks good!
 
 %% ======================= GET PAIRED SPIKE RATE ===============================
-
-
-run_paired_spikerate_by_hasSz_OLD(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
-    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN);
-%{
-run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
-    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN);
-%}
 
 %% ======================= RESTRICT TO STUDY TYPE =======================
 % View 1: FULL (no only_amb restriction) — for ambulatory vs routine comparisons
@@ -289,9 +207,6 @@ ViewsFull.Sessions      = SpikeSummaryTable_FULL;
 ViewsFull.Report        = ReportTable;
 ViewsFull.SzFreqPerPat  = SzFreqPerPatient;
 
-% View 2: FILTERED (apply only_amb) — for Fig 1 + Fig 2 
-Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, SzFreqPerPatient, ...
-                            only_amb, countCol, durCol, NESD_LABEL, badTypes, canonical3);
 
 
 %% ======================= QUICK MODALITY COMPARISONS  =======================
@@ -381,13 +296,158 @@ ReportForKeptSessions.ReportStatus = categorical(repCombined, ["absent","present
 ReportSlim = ReportForKeptSessions(~ismissing(ReportForKeptSessions.ReportStatus), ...
                                    {'Patient','Session','ReportStatus'});
 
+%% ======================= ROC: SPIKE RATE vs REPORT (FIG 1A) =======================
+% Uses multi-threshold spike counts: spikeSummaryMultiCsv
+% Ground truth: ReportSlim.ReportStatus ("present"/"absent")
+% Prediction: spikes present if count > 0 at each probability threshold
 
+MultiS = readtable(spikeSummaryMultiCsv, 'TextType','string','VariableNamingRule','preserve');
 
-JoinA = innerjoin(SessionLevelSpikeRates(:,{'Patient','Session','SpikesPerMin'}), ...
-                  ReportSlim, 'Keys', {'Patient','Session'});
+% Ensure numeric Patient/Session
+if ~isnumeric(MultiS.Patient)
+    MultiS.Patient = double(str2double(string(MultiS.Patient)));
+end
+if ~isnumeric(MultiS.Session)
+    MultiS.Session = double(str2double(string(MultiS.Session)));
+end
 
-x_abs = JoinA.SpikesPerMin(JoinA.ReportStatus=="absent");
-x_pre = JoinA.SpikesPerMin(JoinA.ReportStatus=="present");
+% Restrict to sessions actually used in Fig 1A (filtered cohort + resolvable reports)
+ROCjoin = innerjoin(MultiS, ReportSlim, 'Keys', {'Patient','Session'});
+
+if ~ismember('Duration_sec', ROCjoin.Properties.VariableNames)
+    error('Multi-threshold summary must contain Duration_sec.');
+end
+
+% Identify threshold-count columns (assumes they start with "count_")
+isCountCol = startsWith(string(ROCjoin.Properties.VariableNames), "count_");
+countVars  = string(ROCjoin.Properties.VariableNames(isCountCol));
+
+if isempty(countVars)
+    error('No "count_*" columns found in %s for ROC analysis.', spikeSummaryMultiCsv);
+end
+
+nThr = numel(countVars);
+thrVals = nan(nThr,1);
+TPR     = nan(nThr,1);
+FPR     = nan(nThr,1);
+TP      = nan(nThr,1);
+FP      = nan(nThr,1);
+TN      = nan(nThr,1);
+FN      = nan(nThr,1);
+
+truthPresent = (ROCjoin.ReportStatus == "present");   % logical
+
+for iT = 1:nThr
+    vname = countVars(iT);
+
+    % Extract numeric threshold from column name, e.g. "count_0_43" -> 0.43
+    % If parsing fails, thrVals(iT) stays NaN but stats still computed.
+    tok = regexp(char(vname), 'count_(\d+)_(\d+)', 'tokens', 'once');
+    if ~isempty(tok)
+        thrVals(iT) = str2double(tok{1}) + str2double(tok{2})/100;
+    else
+        tok2 = regexp(char(vname), 'count_(\d+)', 'tokens', 'once');
+        if ~isempty(tok2)
+            thrVals(iT) = str2double(tok2{1}) / 100;
+        end
+    end
+
+    counts = double(ROCjoin.(vname));
+    counts(~isfinite(counts)) = 0;  % treat NaN as 0 detections
+
+    % Predicted "spikes present" if count > 0
+    predPresent = counts > 0;
+
+    TP(iT) = sum( predPresent &  truthPresent);
+    FN(iT) = sum(~predPresent &  truthPresent);
+    FP(iT) = sum( predPresent & ~truthPresent);
+    TN(iT) = sum(~predPresent & ~truthPresent);
+
+    if (TP(iT) + FN(iT)) > 0
+        TPR(iT) = TP(iT) / (TP(iT) + FN(iT));
+    else
+        TPR(iT) = NaN;
+    end
+
+    if (FP(iT) + TN(iT)) > 0
+        FPR(iT) = FP(iT) / (FP(iT) + TN(iT));
+    else
+        FPR(iT) = NaN;
+    end
+end
+
+% Sort by threshold value for ROC curve (if thrVals available)
+[thrVals_sorted, ord] = sort(thrVals);
+TPR_sorted = TPR(ord);
+FPR_sorted = FPR(ord);
+TP_sorted  = TP(ord);
+FP_sorted  = FP(ord);
+TN_sorted  = TN(ord);
+FN_sorted  = FN(ord);
+countVars_sorted = countVars(ord);
+
+% Youden's J and distance to (0,1)
+J       = TPR_sorted - FPR_sorted;
+distTL  = sqrt(FPR_sorted.^2 + (1 - TPR_sorted).^2);
+
+% Choose optimal threshold by maximum Youden's J
+[~, idxBest] = max(J);
+optimal_prob_threshold = thrVals_sorted(idxBest);
+optimal_colname        = countVars_sorted(idxBest);
+
+% AUC via trapezoidal rule (ignore NaNs)
+maskROC = isfinite(TPR_sorted) & isfinite(FPR_sorted);
+[Funiq, ia] = unique(FPR_sorted(maskROC));   % ensure unique FPR
+Tuniq       = TPR_sorted(maskROC);
+Tuniq       = Tuniq(ia);
+AUC         = trapz(Funiq, Tuniq);
+
+% Store ROC results in a table (optional: save to CSV)
+ROC_Table = table(thrVals_sorted, countVars_sorted(:), ...
+    TP_sorted, FP_sorted, TN_sorted, FN_sorted, ...
+    TPR_sorted, FPR_sorted, J, distTL, ...
+    'VariableNames', {'ProbThreshold','CountColumn','TP','FP','TN','FN', ...
+                      'TPR','FPR','YoudenJ','DistTopLeft'});
+
+% Print summary
+fprintf('\n=== ROC: spikes>0 vs report "present" (Panel A cohort) ===\n');
+fprintf('AUC (TPR vs FPR) = %.3f\n', AUC);
+fprintf('Optimal threshold by Youden''s J: %.3f (column %s)\n', ...
+    optimal_prob_threshold, optimal_colname);
+fprintf('At this threshold: TPR=%.3f, FPR=%.3f, TP=%d, FP=%d, TN=%d, FN=%d\n', ...
+    TPR_sorted(idxBest), FPR_sorted(idxBest), ...
+    TP_sorted(idxBest), FP_sorted(idxBest), ...
+    TN_sorted(idxBest), FN_sorted(idxBest));
+
+% ---------- Per-session spike rate at optimal probability threshold ----------
+% ROCjoin already contains the sessions used for Panel A:
+%   ROCjoin: MultiS + ReportSlim on {Patient, Session}
+%   optimal_colname: the count_* column at the best probability threshold.
+
+if ~ismember(optimal_colname, ROCjoin.Properties.VariableNames)
+    error('Optimal count column %s not found in ROCjoin.', optimal_colname);
+end
+if ~ismember('Duration_sec', ROCjoin.Properties.VariableNames)
+    error('ROCjoin must contain Duration_sec to compute spike rates.');
+end
+
+counts_best = double(ROCjoin.(optimal_colname));
+dur_best    = double(ROCjoin.Duration_sec);
+
+badDur = ~isfinite(dur_best) | dur_best <= 0;
+if any(badDur)
+    warning('Some rows in ROCjoin have nonpositive/NaN Duration_sec; spike rates set to NaN there.');
+end
+
+spkPerMin_best = nan(size(counts_best));
+okDur = ~badDur;
+spkPerMin_best(okDur) = (counts_best(okDur) ./ dur_best(okDur)) * 60;  % spikes/min at optimal prob
+
+% Split by report-present vs report-absent using optimal-prob spike rates
+x_abs = spkPerMin_best(ROCjoin.ReportStatus=="absent");
+x_pre = spkPerMin_best(ROCjoin.ReportStatus=="present");
+
+% Rank-sum test & log10 transform for Panel A using optimal-prob spike rates
 p_rankSum_A  = NaN;
 if nnz(isfinite(x_abs))>=3 && nnz(isfinite(x_pre))>=3
     p_rankSum_A = ranksum(x_abs, x_pre, 'method','approx');
@@ -395,6 +455,144 @@ end
 Y_A = to_log10_from_per_min([x_abs(:); x_pre(:)], EPS_PER_MIN);
 G_A = [repmat("Absent", numel(x_abs), 1); repmat("Present", numel(x_pre), 1)];
 
+
+% Make ROC figure
+fROC = figure('Color','w','Position',[100 100 600 550]);
+hold on; grid on; box on;
+plot(FPR_sorted, TPR_sorted, '-o', 'LineWidth', 2, 'MarkerSize', 6);
+plot([0 1],[0 1],'k--','LineWidth',1);  % chance line
+
+% Highlight optimal point
+plot(FPR_sorted(idxBest), TPR_sorted(idxBest), 'ro', ...
+    'MarkerSize',10,'LineWidth',2);
+text(FPR_sorted(idxBest), TPR_sorted(idxBest), ...
+    sprintf('  best thr=%.2f', optimal_prob_threshold), ...
+    'HorizontalAlignment','left','VerticalAlignment','bottom', ...
+    'FontSize',12);
+
+xlim([0 1]); ylim([0 1]);
+xlabel('False Positive Rate (1 - specificity)');
+ylabel('True Positive Rate (sensitivity)');
+title('ROC: automated spikes>0 vs reported spike presence');
+
+set(gca,'FontSize',14);
+
+% Optionally export
+rocFigOut = '../figures/roc_spike_presence_vs_report.png';
+if ~exist(fileparts(rocFigOut),'dir'), mkdir(fileparts(rocFigOut)); end
+exportgraphics(fROC, rocFigOut, 'Resolution', 300);
+fprintf('Saved ROC figure to: %s\n', rocFigOut);
+
+% Expose optimal_prob_threshold to caller workspace in case you want it later
+assignin('base','optimal_prob_threshold',optimal_prob_threshold);
+assignin('base','ROC_Table',ROC_Table);
+
+%% ======================= APPLY OPTIMAL THRESHOLD GLOBALLY ======================
+% We will:
+%   * Read the multi-threshold summary
+%   * Grab the best count column (optimal_colname)
+%   * Add "BestCount" to SpikeSummaryTable
+%   * Overwrite the chosen countCol with BestCount where available
+%   * Recompute SpikeRate_perHour / SpikeRate_perMin
+%   * Rebuild Views + paired analysis using these new spike rates
+
+fprintf('\n=== Applying optimal threshold %s to all sessions ===\n', optimal_colname);
+
+MultiAll = readtable(spikeSummaryMultiCsv, ...
+    'TextType','string','VariableNamingRule','preserve');
+
+% Ensure numeric keys in MultiAll
+if ~isnumeric(MultiAll.Patient)
+    MultiAll.Patient = double(str2double(string(MultiAll.Patient)));
+end
+if ~isnumeric(MultiAll.Session)
+    MultiAll.Session = double(str2double(string(MultiAll.Session)));
+end
+
+% Sanity checks
+if ~ismember(optimal_colname, MultiAll.Properties.VariableNames)
+    error('Optimal count column %s not found in %s.', optimal_colname, spikeSummaryMultiCsv);
+end
+
+% Only bring in BestCount (NO Duration_sec here to avoid name collisions)
+BestCounts = MultiAll(:, {'Patient','Session'});
+BestCounts.BestCount = double(MultiAll.(optimal_colname));
+
+% Outer join just to add BestCount
+SpikeSummaryTable = outerjoin(SpikeSummaryTable, BestCounts, ...
+    'Keys', {'Patient','Session'}, ...
+    'MergeKeys', true, ...
+    'Type', 'left');
+
+% Decide which rows get the best-threshold counts
+hasBest = ismember('BestCount', SpikeSummaryTable.Properties.VariableNames) & ...
+          isfinite(SpikeSummaryTable.BestCount);
+
+if ~any(hasBest)
+    warning('No sessions had BestCount from %s; falling back to original spike counts.', ...
+        spikeSummaryMultiCsv);
+else
+    fprintf('Best-threshold counts available for %d/%d sessions.\n', ...
+        nnz(hasBest), height(SpikeSummaryTable));
+
+    % Overwrite the countCol with BestCount where available
+    if ~ismember(countCol, string(SpikeSummaryTable.Properties.VariableNames))
+        error('countCol "%s" not found in SpikeSummaryTable.', countCol);
+    end
+
+    tmpCounts = double(SpikeSummaryTable.(countCol));
+    tmpCounts(hasBest) = double(SpikeSummaryTable.BestCount(hasBest));
+    SpikeSummaryTable.(countCol) = tmpCounts;
+
+    % Recompute spike rates using the updated counts; DURCOL NAME IS UNCHANGED
+    SpikeSummaryTable = ensure_spikerates(SpikeSummaryTable, countCol, durCol);
+end
+
+% Also update the FULL copy used for modality comparisons
+SpikeSummaryTable_FULL = SpikeSummaryTable;
+
+%% ======================= REBUILD FILTERED VIEWS WITH BEST THRESHOLD ============
+Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, SzFreqPerPatient, ...
+                            only_amb, countCol, durCol, NESD_LABEL, badTypes, canonical3);
+
+% Overwrite the convenience variables for plotting with the best-threshold versions
+SessionLevelSpikeRates   = Views.SessionLevelSpikeRates;      % per-session spikes/min
+ReportForKeptSessions    = Views.ReportForKeptSessions;       % report rows matching sessions used
+PatientLevelSpikeRates   = Views.PatientLevelSpikeRates;      % per-patient mean spike rates
+SubtypePairs             = Views.Canonical3_Pairs;            % pair labels for subtype comparisons
+p_pair_bonf              = Views.PvalsPairwiseBonf;
+p_pair_raw               = Views.PvalsPairwise;
+
+isEpilepsyMask           = Views.IsEpilepsyMask;
+isNESDMask               = Views.IsNESDMask;
+SubtypeSubsetTable       = Views.Canonical3_SubsetTable;
+SubtypeStatsTable        = Views.Canonical3_Stats;
+
+%% ======================= RE-RUN PAIRED HasSz ANALYSIS WITH BEST THRESHOLD =====
+run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
+    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN);
+
+
+%% ======================= REBUILD FILTERED VIEWS WITH BEST THRESHOLD ============
+Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, SzFreqPerPatient, ...
+                            only_amb, countCol, durCol, NESD_LABEL, badTypes, canonical3);
+
+% Overwrite the convenience variables for plotting with the best-threshold versions
+SessionLevelSpikeRates   = Views.SessionLevelSpikeRates;      % per-session spikes/min
+ReportForKeptSessions    = Views.ReportForKeptSessions;       % report rows matching sessions used
+PatientLevelSpikeRates   = Views.PatientLevelSpikeRates;      % per-patient mean spike rates
+SubtypePairs             = Views.Canonical3_Pairs;            % pair labels for subtype comparisons
+p_pair_bonf              = Views.PvalsPairwiseBonf;
+p_pair_raw               = Views.PvalsPairwise;
+
+isEpilepsyMask           = Views.IsEpilepsyMask;
+isNESDMask               = Views.IsNESDMask;
+SubtypeSubsetTable       = Views.Canonical3_SubsetTable;
+SubtypeStatsTable        = Views.Canonical3_Stats;
+
+%% ======================= RE-RUN PAIRED HasSz ANALYSIS WITH BEST THRESHOLD =====
+run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
+    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN);
 
 
 
@@ -415,13 +613,13 @@ G_B = [repmat("Epilepsy", n_ep, 1); repmat("NESD", n_nes, 1)];
 % ---- Panel C calculations: General vs Temporal vs Frontal (patient-level) ----
 Y_C = to_log10_per_min(SubtypeSubsetTable.MeanSpikeRate_perHour, EPS_PER_MIN);
 
-% === NEW: Figure 1 (binary spike rate using cutoff 1 spike/hour) ==========
+% === NEW: Figure 1 (binary spike rate using cutoff 1 spike/hour, at optimal prob) ==========
 fig1_bin_out    = '../figures/spikerate_control_panels_binary_1perhr.png';
-cutoff_per_hour = nanmedian(Views.SessionLevelSpikeRates.SpikesPerMin)*60;
+cutoff_per_hour = 1;   % 1 spike/hour cutoff
 
 make_control_fig_binary_spikerate( ...
-    x_abs, x_pre, ...                 % per-session spikes/min for Panel A
-    x_ep,  x_nes, ...                 % per-patient spikes/hour for Panel B
+    x_abs, x_pre, ...                 % per-session spikes/min at optimal prob (Panel A)
+    x_ep,  x_nes, ...                 % per-patient spikes/hour (unchanged for now)
     SubtypeSubsetTable, canonical3, ... % subtype table for Panel C
     cutoff_per_hour, fig1_bin_out);
 
@@ -699,171 +897,6 @@ make_spearman_nonzero_fig(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
     canonical3, spearman_xLims, spearman_yLims, fig4_out);
 
 
-%% ======================= FIGURE 5: SPEARMAN — % VISITS WITH SEIZURES =======================
-% Here, "seizure frequency" is defined as the percentage of visits
-% (with HasSz explicitly 0 or 1) where HasSz==1, per patient.
-
-fig5_out = '../figures/spearman_spikerate_pctHasSz_visits.png';
-
-% 1) Per-patient % of visits with HasSz==1 (using outpatient-filtered ReportTable)
-HasSzFracPerPatient = compute_HasSz_fraction_per_patient(ReportTable);
-
-% 2) Link to per-patient spike rates from the FILTERED view (only_amb already applied)
-PatRate = Views.PatientLevelSpikeRates(:,{'Patient','MeanSpikeRate_perMin'});
-PatFrac = innerjoin(PatRate, HasSzFracPerPatient, 'Keys','Patient');
-
-% Express as percentage for plotting (Spearman is invariant to *100)
-PatFrac.PercentHasSz = 100 * PatFrac.FracVisits_HasSz1;
-
-% Drop patients with NaN fraction or spike rate
-mask_valid = isfinite(PatFrac.PercentHasSz) & isfinite(PatFrac.MeanSpikeRate_perMin);
-PatFrac = PatFrac(mask_valid,:);
-
-if isempty(PatFrac)
-    warning('No patients with both spike-rate and %HasSz data; skipping Figure 5.');
-else
-    % 3) Build typed table (Frontal / Temporal / General) using existing typing
-    TypingFiltered = Views.PatientTypingFiltered;  % from build_filtered_view
-    PatFracTyped = innerjoin(PatFrac, TypingFiltered(:,{'Patient','EpiType3'}), 'Keys','Patient');
-
-    % 4) Log10(spikes/min) transform with eps guard (same style as Fig 2)
-    minpos_rate = min(PatFrac.MeanSpikeRate_perMin(PatFrac.MeanSpikeRate_perMin>0), [], 'omitnan');
-    if isempty(minpos_rate), minpos_rate = 1e-6; end
-    eps_rate = 0.5 * minpos_rate;
-
-    PatFrac.logSpikeRate = log10(PatFrac.MeanSpikeRate_perMin + ...
-                                 (PatFrac.MeanSpikeRate_perMin<=0).*eps_rate);
-
-    PatFracTyped.logSpikeRate = log10(PatFracTyped.MeanSpikeRate_perMin + ...
-                                      (PatFracTyped.MeanSpikeRate_perMin<=0).*eps_rate);
-
-    % 5) Spearman correlations: overall + by EpiType3
-    x_all = PatFrac.PercentHasSz;
-    y_all = PatFrac.logSpikeRate;
-    mask_all = isfinite(x_all) & isfinite(y_all);
-    [rs_all_pct, p_all_pct] = corr(x_all(mask_all), y_all(mask_all), ...
-        'Type','Spearman','Rows','complete');
-    n_all_pct = sum(mask_all);
-
-    rowsOut = {};
-    for g = canonical3
-        gStr = char(g);
-        m = strcmp(string(PatFracTyped.EpiType3), gStr) & ...
-            isfinite(PatFracTyped.PercentHasSz) & ...
-            isfinite(PatFracTyped.logSpikeRate);
-
-        x = PatFracTyped.PercentHasSz(m);
-        y = PatFracTyped.logSpikeRate(m);
-        n = numel(x);
-
-        if n >= 3
-            [rs, p] = corr(x, y, 'Type','Spearman','Rows','complete');
-        else
-            rs = NaN; p = NaN;
-        end
-        rowsOut(end+1,:) = {gStr, n, rs, p}; %#ok<SAGROW>
-    end
-    SpearmanPct = cell2table(rowsOut, 'VariableNames', {'Group','N','Spearman_r','p_raw'});
-    k_pct = height(SpearmanPct);
-    SpearmanPct.p_bonf = min(SpearmanPct.p_raw * k_pct, 1);
-
-    fprintf('\n=== Spearman: log10(spikes/min) vs %% of visits with HasSz==1 ===\n');
-    disp([table("Overall (all patients)", n_all_pct, rs_all_pct, p_all_pct, NaN, ...
-          'VariableNames', {'Group','N','Spearman_r','p_raw','p_bonf'}); SpearmanPct])
-
-    % 6) Plot: 2x2 panels, x = % visits with seizures, y = log10(spikes/min)
-    fontL = 20;
-    xLims_pct = [0 100];
-    yLims_pct = spearman_yLims;  % reuse [-3, 2] from main config
-
-    f5 = figure('Color','w','Position',[60 60 1200 900]);
-    tiledlayout(f5,2,2,'Padding','compact','TileSpacing','compact');
-
-    % ---- Panel A: overall ----
-    axA5 = nexttile(1); hold(axA5,'on'); grid(axA5,'on'); box(axA5,'off');
-    scatter(axA5, x_all(mask_all), y_all(mask_all), 18, [0.3 0.3 0.3], ...
-        'filled','MarkerFaceAlpha',0.35);
-
-    if n_all_pct >= 3
-        X = [ones(n_all_pct,1), x_all(mask_all)];
-        b = X \ y_all(mask_all);
-        xgrid = linspace(xLims_pct(1), xLims_pct(2), 300)';
-        plot(axA5, xgrid, b(1) + b(2)*xgrid, 'k-', 'LineWidth', 2);
-    end
-
-    xlim(axA5, xLims_pct); ylim(axA5, yLims_pct);
-    xlabel(axA5,'% of visits with seizures (HasSz==1)','FontSize',fontL);
-    ylabel(axA5,'log_{10} Spikes per minute','FontSize',fontL);
-    title(axA5, sprintf('A. All patients (N=%d) — %s', n_all_pct, segLabel), ...
-        'FontSize',fontL,'FontWeight','bold');
-    txtA = sprintf('Spearman r=%.3f, p=%.3g', rs_all_pct, p_all_pct);
-    text(axA5, 0.98, 0.95, txtA, 'Units','normalized', ...
-         'HorizontalAlignment','right','VerticalAlignment','top', ...
-         'FontSize',fontL-2,'FontWeight','bold');
-    set(axA5,'FontSize',fontL);
-
-    % ---- Panels B/C/D: Frontal, Temporal, General ----
-    panelOrder = {'Frontal','Temporal','General'};
-    panelTitle = {'B. Frontal','C. Temporal','D. General'};
-    cols = lines(3);
-    presentCats = categories(removecats(categorical(string(PatFracTyped.EpiType3), canonical3)));
-
-    for p = 1:3
-        ax = nexttile(p+1); hold(ax,'on'); grid(ax,'on'); box(ax,'off');
-
-        if ~ismember(panelOrder{p}, presentCats)
-            axis(ax,'off');
-            continue;
-        end
-
-        gStr = panelOrder{p};
-        m = strcmp(string(PatFracTyped.EpiType3), gStr) & ...
-            isfinite(PatFracTyped.PercentHasSz) & ...
-            isfinite(PatFracTyped.logSpikeRate);
-
-        xg = PatFracTyped.PercentHasSz(m);
-        yg = PatFracTyped.logSpikeRate(m);
-        nNow = numel(xg);
-
-        if nNow == 0
-            axis(ax,'off'); continue;
-        end
-
-        col = cols(min(p,size(cols,1)),:);
-        scatter(ax, xg, yg, 24, col, 'filled','MarkerFaceAlpha',0.4);
-
-        if nNow >= 3
-            Xg = [ones(nNow,1), xg(:)];
-            bg = Xg \ yg(:);
-            xgrid = linspace(xLims_pct(1), xLims_pct(2), 250)';
-            plot(ax, xgrid, bg(1) + bg(2)*xgrid, '-', 'Color', col, 'LineWidth', 2);
-        end
-
-        xlim(ax, xLims_pct); ylim(ax, yLims_pct);
-
-        row = SpearmanPct(strcmp(SpearmanPct.Group, gStr), :);
-        if ~isempty(row) && row.N >= 3 && isfinite(row.Spearman_r)
-            txt = sprintf('Spearman r=%.3f, p_{bonf}=%.3g', row.Spearman_r, row.p_bonf);
-        else
-            txt = 'Insufficient data';
-        end
-
-        title(ax, sprintf('%s (N=%d)', panelTitle{p}, nNow), ...
-            'FontSize',fontL,'FontWeight','bold');
-        text(ax, 0.98, 0.95, txt, 'Units','normalized', ...
-             'HorizontalAlignment','right','VerticalAlignment','top', ...
-             'FontSize',fontL-3,'FontWeight','bold');
-        xlabel(ax,'% of visits with seizures (HasSz==1)','FontSize',fontL);
-        ylabel(ax,'log_{10} Spikes per minute','FontSize',fontL);
-        set(ax,'FontSize',fontL);
-    end
-
-    if ~exist(fileparts(fig5_out),'dir'), mkdir(fileparts(fig5_out)); end
-    exportgraphics(f5, fig5_out, 'Resolution', 300);
-    fprintf('Saved Fig 5 (Spearman vs %%HasSz visits): %s\n', fig5_out);
-end
-
-
 %% ======================= HELPER FUNCTIONS ===================================
 
 function S = ensure_spikerates(S, countCol, durCol)
@@ -884,12 +917,9 @@ S.SpikeRate_perMin(S.SpikeRate_perMin < -1e-12) = NaN;
 end
 
 
-function [PatientTypingAll, SzFreqPerPatient] = build_patient_metrics_from_report(R, canonical3, hassz_replace)
+function [PatientTypingAll, SzFreqPerPatient] = build_patient_metrics_from_report(R, canonical3,hassz_replace)
 
-% Erin checked original function 11/20
-% Updated: add imputation for NaN Freq with HasSz==1:
-%   assume exactly 1 seizure between previous and current visit,
-%   set Freq = 1 / (months between visits), using ~30.44 days/month.
+% Erin checked this function 11/20
 
 % Build patient-level typing (Type + Specific → EpiType3) and MeanSzFreq once.
 if ~isstring(R.sz_freqs),         R.sz_freqs         = string(R.sz_freqs);         end
@@ -931,8 +961,7 @@ for j = 1:height(R)
     else
         v = [];
     end
-    v(~isfinite(v)) = NaN; 
-    v(v<0) = NaN; % -2 turns into NaN here
+    v(~isfinite(v)) = NaN; v(v<0) = NaN; % -2 turns into NaN here
 
     % hasSz
     hs = strtrim(R.visit_hasSz(j)); h = nan(0,1);
@@ -983,72 +1012,17 @@ for g = 1:numGroups
 end
 
 Freq_agg = splitapply(@(x) mean(x(isfinite(x)),'omitnan'), PV.Freq, gv); % Get a single unique sz frequency for each visit
-Has_agg  = splitapply(@(x) max_hasSz(x(isfinite(x))), PV.HasSz, gv);    % get a single unique has sz for each visit
+Has_agg  = splitapply(@(x) max_hasSz(x(isfinite(x))), PV.HasSz, gv); % get a single unique has sz for each visit
 
-% build table for unique visits - can be checked against redcap
+% build table for unique visits - I can check that this agrees with redcap
+% (I did a few spot checks)
 Vuniq = table(pid_keys, date_keys, Freq_agg, Has_agg, ...
     'VariableNames', {'Patient','VisitDate','Freq','HasSz'});
 Vuniq.Freq(Vuniq.Freq<0) = NaN; % negative sz frequencies should be nans
-Vuniq.OldFreq = Vuniq.Freq; % save orig for error checking
+
 if hassz_replace == 1
-    % ---------- Rule 1 (existing): HasSz==0 & missing Freq -> 0 ----------
+    % If visit frequency is NaN but Has Sz is 0, change visit frequency to zero!!
     Vuniq.Freq(~isfinite(Vuniq.Freq) & Vuniq.HasSz==0) = 0; 
-
-    % ---------- Rule 2 (NEW): HasSz==1 & missing Freq ----------
-    % For each patient, sort visits by date. For any visit with
-    %   HasSz==1 & Freq is NaN,
-    % impute Freq = 1 / (months between previous and current visit),
-    % assuming exactly 1 seizure occurred in that interval.
-    %
-    % If no prior visit or zero/negative gap -> leave as NaN.
-
-    [gP, ~] = findgroups(Vuniq.Patient);
-
-    for k = 1:max(gP)
-        idx = find(gP == k);
-        if numel(idx) < 2
-            continue; % need at least 2 visits to define an interval
-        end
-
-        % sort this patient's visits by VisitDate
-        [~, ord] = sort(Vuniq.VisitDate(idx));
-        idx = idx(ord);
-
-        for ii = 1:numel(idx)
-            r = idx(ii);
-
-            % Only act on HasSz==1 and missing frequency
-            if ~(Vuniq.HasSz(r) == 1 && ~isfinite(Vuniq.Freq(r)))
-                continue;
-            end
-
-            % Need a prior visit to define the inter-visit interval
-            if ii == 1
-                % no prior visit → cannot impute; leave as NaN
-                continue;
-            end
-
-            prevIdx = idx(ii-1);
-
-            if isnat(Vuniq.VisitDate(prevIdx)) || isnat(Vuniq.VisitDate(r))
-                continue;
-            end
-
-            dt_days = days(Vuniq.VisitDate(r) - Vuniq.VisitDate(prevIdx));
-            if dt_days <= 0
-                % Same day or out-of-order dates → skip imputation
-                continue;
-            end
-
-            % Convert days to "months" (approx 30.44 days per month)
-            months_between = dt_days / 30.4375;
-
-            % Avoid division by zero just in case
-            if months_between > 0
-                Vuniq.Freq(r) = 1 / months_between;
-            end
-        end
-    end
 end
 
 % Now group by patient
@@ -1089,8 +1063,6 @@ SpecCanon(isFrontal)  = "Frontal";
 SpecCanon((strlength(SpecCanon)==0) & isGeneral) = "General";
 PatientTypingAll.EpiType3 = categorical(SpecCanon, canonical3);
 end
-
-
 
 function out = max_hasSz(x)
     xf = x(isfinite(x));
@@ -1530,7 +1502,7 @@ end
 
 end
 
-function run_paired_spikerate_by_hasSz_OLD(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
+function run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
     which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN)
 % run_paired_spikerate_by_hasSz
 %   Uses ALREADY-LOADED and ALREADY-OUTPATIENT-FILTERED:
@@ -1712,7 +1684,6 @@ function run_paired_spikerate_by_hasSz_OLD(SpikeSummaryTable, ReportTable, Patie
     fprintf('Matched %d EEG–visit pairs under [%d days pre, %d days post].\n', ...
         height(pairs), preGapDays, postGapDays);
 
-    orig_pairs = pairs;
 
     % Require ≥2 pairs per patient (at least two EEG–visit pairs)
     gc = groupcounts(pairs,'Patient');
@@ -2080,701 +2051,5 @@ function make_control_fig_binary_spikerate( ...
         end
         exportgraphics(f, outPng, 'Resolution', 300);
         fprintf('Saved binary cutoff Fig 1 to: %s\n', outPng);
-    end
-end
-
-
-function HasSzFracPerPatient = compute_HasSz_fraction_per_patient(R)
-% compute_HasSz_fraction_per_patient
-%   For each patient, compute:
-%       FracVisits_HasSz1 = (# visits with HasSz==1) / (# visits with HasSz==0 or 1)
-%   and MeanSzFreq_raw   = mean seizure frequency across visits (no replacement rules).
-%
-%   Visits are defined by patient_id + VisitDate (same logic as in
-%   build_patient_metrics_from_report). Visits where HasSz is NaN or 2 are
-%   ignored for the fraction. Freq is taken directly from R.sz_freqs
-%   (parsed, no imputation).
-
-    % Ensure strings
-    if ~isstring(R.visit_dates_deid), R.visit_dates_deid = string(R.visit_dates_deid); end
-    if ~isstring(R.visit_hasSz),      R.visit_hasSz      = string(R.visit_hasSz);      end
-    if ~isstring(R.sz_freqs),         R.sz_freqs         = string(R.sz_freqs);         end
-
-    % Table of per-visit entries (before collapsing duplicates)
-    PV = table('Size',[0 4], ...
-               'VariableTypes',{'double','datetime','double','double'}, ...
-               'VariableNames',{'Patient','VisitDate','HasSz','Freq'});
-
-    for j = 1:height(R)
-        pid = double(R.patient_id(j));
-
-        % --- visit_dates_deid ---
-        ds = strtrim(R.visit_dates_deid(j));
-        dd = string([]);
-        if strlength(ds)>0 && ds~="[]" && ds~=""
-            try
-                dd = string(jsondecode(char(ds)));
-            catch
-                dd = string(regexp(ds,'\d{4}-\d{2}-\d{2}','match'));
-            end
-        end
-        try
-            d = datetime(dd,'InputFormat','yyyy-MM-dd');
-        catch
-            d = datetime(dd);
-        end
-
-        % --- visit_hasSz ---
-        hs = strtrim(R.visit_hasSz(j));
-        h = nan(0,1);
-        if strlength(hs)>0 && hs~="[]" && hs~=""
-            h = double(jsondecode(char(hs)));
-        end
-        h(h==2) = NaN;   % 2 = unclear → ignore
-
-        % --- sz_freqs (raw, no replacement rules) ---
-        fs = strtrim(R.sz_freqs(j));
-        f = nan(0,1);
-        if strlength(fs)>0 && fs~="[]" && fs~=""
-            try
-                f = double(jsondecode(char(fs)));
-            catch
-                % If something weird, fallback: try to grab numbers from string
-                tmp = regexp(fs, '[-+]?\d*\.?\d+([eE][-+]?\d+)?', 'match');
-                if ~isempty(tmp)
-                    f = str2double(tmp);
-                end
-            end
-        end
-
-        % basic consistency
-        if ~(numel(d)==numel(h) && numel(d)==numel(f))
-            error('Length mismatch for patient %g at row %d: dates=%d, hasSz=%d, freq=%d', ...
-                pid, j, numel(d), numel(h), numel(f));
-        end
-
-        n = numel(h);
-        if n==0, continue; end
-
-        PV = [PV; table(repmat(pid,n,1), d(:), h(:), f(:), ...
-            'VariableNames', PV.Properties.VariableNames)]; %#ok<AGROW>
-    end
-
-    % Drop rows with NaT dates
-    PV(isnat(PV.VisitDate),:) = [];
-
-    if isempty(PV)
-        HasSzFracPerPatient = table([], [], [], ...
-            'VariableNames',{'Patient','FracVisits_HasSz1','MeanSzFreq_raw'});
-        return;
-    end
-
-    % Collapse duplicates per (Patient, VisitDate), enforcing HasSz consistency,
-    % and aggregating Freq by mean (raw, no imputation).
-    [gv, pid_keys, date_keys] = findgroups(PV.Patient, PV.VisitDate);
-    numGroups = max(gv);
-
-    Has_agg  = NaN(numGroups,1);
-    Freq_agg = NaN(numGroups,1);
-
-    for g = 1:numGroups
-        xh = PV.HasSz(gv==g);
-        xf = PV.Freq(gv==g);
-
-        % ---- HasSz aggregation ----
-        xh_fin = xh(isfinite(xh));   % ignore NaN
-        if isempty(xh_fin)
-            Has_agg(g) = NaN;
-        else
-            if max(xh_fin) ~= min(xh_fin)
-                error('HasSz mismatch in group %d (Patient %g, Date %s): values=%s', ...
-                    g, pid_keys(g), string(date_keys(g)), mat2str(xh_fin));
-            end
-            Has_agg(g) = xh_fin(1);
-        end
-
-        % ---- Freq aggregation (mean of finite values) ----
-        xf_fin = xf(isfinite(xf));
-        if isempty(xf_fin)
-            Freq_agg(g) = NaN;
-        else
-            Freq_agg(g) = mean(xf_fin);
-        end
-    end
-
-    Vuniq = table(pid_keys, date_keys, Has_agg, Freq_agg, ...
-        'VariableNames', {'Patient','VisitDate','HasSz','Freq'});
-
-    % Per-patient fraction and mean freq (raw)
-    [gp, pids] = findgroups(Vuniq.Patient);
-    FracVisits_HasSz1 = splitapply(@local_frac, Vuniq.HasSz, gp);
-    MeanSzFreq_raw    = splitapply(@local_mean_nonan, Vuniq.Freq, gp);
-
-    HasSzFracPerPatient = table(pids, FracVisits_HasSz1, MeanSzFreq_raw, ...
-        'VariableNames', {'Patient','FracVisits_HasSz1','MeanSzFreq_raw'});
-end
-
-% ---- local helpers -------------------------------------------------------
-function f = local_frac(x)
-    x = x(isfinite(x));   % 0 or 1, ignore NaN
-    if isempty(x)
-        f = NaN;
-    else
-        f = sum(x==1) / numel(x);
-    end
-end
-
-function m = local_mean_nonan(x)
-    x = x(isfinite(x));
-    if isempty(x)
-        m = NaN;
-    else
-        m = mean(x);
-    end
-end
-
-
-function run_paired_spikerate_by_hasSz(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
-    which_runs, only_amb, badTypes, NESD_LABEL, EPS_PER_MIN)
-% run_paired_spikerate_by_hasSz
-%   Uses ALREADY-LOADED and ALREADY-OUTPATIENT-FILTERED:
-%       - SpikeSummaryTable (with SpikeRate_perHour / SpikeRate_perMin)
-%       - ReportTable       (with patient_id, session_number, visit_dates_deid, visit_hasSz, etc.)
-%       - PatientTypingAll  (from build_patient_metrics_from_report)
-%
-%   For each patient:
-%       compares mean spike rate across visits with HasSz==0 vs HasSz==1
-%       (per-patient paired analysis), for ALL valid epilepsy patients
-%       (NESD + badTypes excluded).
-%
-%   Stats:
-%       - Wilcoxon sign-rank on RAW spikes/hour.
-%       - Effect size = Hodges–Lehmann (HL) estimator of the paired
-%         difference in spikes/hour (HasSz==1 minus HasSz==0).
-%
-%   Plot:
-%       - Left panel: paired plot of log10(spikes/min) with jitter
-%                    + p-value + HL Δ in title/subtitle.
-%       - Right panel: sensitivity of HL vs. allowable EEG–visit gap
-%                     (two lines, significance marked by * where p<0.05).
-%
-%   Cohort filters respected:
-%       - only_amb (0/all, 1/amb only, 2/routine only)
-%       - outpatient filter has already been applied upstream.
-
-    % ---------------- CONFIG LOCAL TO THIS ANALYSIS ----------------
-    pairsOut    = '../output/eeg_visit_pairs_pairedmeans.csv';
-    saveAudit   = true;
-    preGapDays  = 365;   % BASELINE: EEG may be up to this many days BEFORE the visit
-    postGapDays = 30;    % BASELINE: EEG may be up to this many days AFTER  the visit
-
-    % EPS in spikes/hour and spikes/min
-    EPS_PLOT_perMin = EPS_PER_MIN;          % already in per-minute units from main script
-
-    % Segment label (for figure titles) — keep consistent with main script
-    switch which_runs
-        case 1
-            segLabel = 'First run (~1h)';
-        case 2
-            segLabel = 'First 24 runs (~24h)';
-        otherwise
-            segLabel = 'Whole file';
-    end
-    segLabel = string(segLabel);
-
-    % ---------------- COPY TABLES LOCALLY ----------------
-    S = SpikeSummaryTable;
-    R = ReportTable;
-
-    % Sanity: need these columns
-    needS = {'Patient','Session','Duration_sec','SpikeRate_perHour'};
-    if ~all(ismember(needS, S.Properties.VariableNames))
-        error('SpikeSummaryTable is missing required columns: %s', ...
-            strjoin(setdiff(needS, S.Properties.VariableNames), ', '));
-    end
-
-    needR = {'patient_id','session_number','start_time_deid','visit_dates_deid', ...
-             'visit_hasSz','epilepsy_type','epilepsy_specific'};
-    if ~all(ismember(needR, R.Properties.VariableNames))
-        error('ReportTable is missing required columns: %s', ...
-            strjoin(setdiff(needR, R.Properties.VariableNames), ', '));
-    end
-
-    % Ensure numeric IDs
-    if ~isnumeric(S.Patient),        S.Patient        = double(str2double(string(S.Patient)));        end
-    if ~isnumeric(S.Session),        S.Session        = double(str2double(string(S.Session)));        end
-    if ~isnumeric(R.patient_id),     R.patient_id     = double(str2double(string(R.patient_id)));     end
-    if ~isnumeric(R.session_number), R.session_number = double(str2double(string(R.session_number))); end
-
-    % ---------------- AMBULATORY / ROUTINE FILTER ON S ----------------
-    if only_amb == 1
-        S(S.Duration_sec < 3600*12,:) = [];
-    elseif only_amb == 2
-        S(S.Duration_sec > 3600*12,:) = [];
-    end
-
-    % ---------------- PATIENT-LEVEL INCLUSION: "ALL EPILEPSY" ----------------
-    % Use PatientTypingAll (already built in main script)
-    et = string(PatientTypingAll.EpilepsyType);
-    et_norm = lower(strtrim(et));
-    isEmpty = ismissing(et) | strlength(strtrim(et))==0;
-    isNESD  = et_norm == lower(strtrim(NESD_LABEL));
-    isBad   = isNESD | ismember(et_norm, badTypes) | isEmpty;
-
-    validP = double(PatientTypingAll.Patient(~isBad));
-
-    S = S(ismember(S.Patient,     validP), :);
-    R = R(ismember(R.patient_id,  validP), :);
-
-    % ---------------- EEG DATE FROM start_time_deid ----------------
-    rawStart = string(R.start_time_deid);
-    okStart  = ~ismissing(rawStart) & strlength(strtrim(rawStart))>0;
-    R.EEG_Date = NaT(height(R),1);
-    R.EEG_Date(okStart) = datetime(strtrim(rawStart(okStart)), 'InputFormat','yyyy-MM-d HH:mm:ss');
-
-    % ---------------- PARSE visit_dates_deid + visit_hasSz ----------------
-    R.VisitDates = cell(height(R),1);
-    R.HasSzVec   = cell(height(R),1);
-    for i = 1:height(R)
-        % visit_dates_deid
-        vstr = strtrim(string(R.visit_dates_deid(i)));
-        if strlength(vstr)>0 && vstr~="[]"
-            vcell = jsondecode(vstr);
-            vdt   = datetime(vcell, 'InputFormat','yyyy-MM-dd');
-            R.VisitDates{i} = vdt(:);
-        else
-            R.VisitDates{i} = NaT(0,1);
-        end
-
-        % visit_hasSz
-        hstr = strtrim(string(R.visit_hasSz(i)));
-        if strlength(hstr)>0 && hstr~="[]"
-            hv = jsondecode(char(hstr));
-            has_sz = double(hv(:));
-            has_sz(has_sz==2) = nan;
-            R.HasSzVec{i} = has_sz;
-        else
-            R.HasSzVec{i} = nan(0,1);
-        end
-    end
-
-    % ---------------- JOIN S + R ON (Patient, Session) FOR BASELINE ----------------
-    rightVars = {'EEG_Date','VisitDates','HasSzVec','epilepsy_type','acquired_on','report_PATIENT_CLASS'};
-    JR = innerjoin(S, R, ...
-        'LeftKeys',{'Patient','Session'}, ...
-        'RightKeys',{'patient_id','session_number'}, ...
-        'RightVariables', rightVars);
-
-    % keep rows with valid EEG date and at least one visit date
-    JR = JR(~isnat(JR.EEG_Date) & cellfun(@(v)~isempty(v) & any(~isnat(v)), JR.VisitDates), :);
-
-    if isempty(JR)
-        warning('run_paired_spikerate_by_hasSz: No EEG rows with valid visit arrays; skipping.');
-        return;
-    end
-
-    % ---------------- BASELINE EEG–VISIT PAIRS (NEAREST VISIT IN ASYMMETRIC WINDOW) ----------------
-    pairs = table('Size',[0 9], ...
-        'VariableTypes', {'double','double','string','datetime','double','datetime','double','double','string'}, ...
-        'VariableNames', {'Patient','Session','EEG_Name','EEG_Date','SpikeRate_perHour', ...
-                          'Visit_Date','HasSz','GapDays_abs','EpilepsyType'});
-
-    for i = 1:height(JR)
-        eegDate = JR.EEG_Date(i);
-        vdates  = JR.VisitDates{i};
-        hasV    = JR.HasSzVec{i};
-
-        if isempty(vdates) || isempty(hasV), continue; end
-        assert(numel(hasV)==numel(vdates))
-        nAlign = min(numel(vdates), numel(hasV));
-        if nAlign==0, continue; end
-        vdates = vdates(1:nAlign);
-        hasV   = hasV(1:nAlign);
-
-        % compute the difference in days between eeg and visit date
-        dSigned = days(eegDate - vdates);
-
-        % determine which are within allowable gap
-        elig = (dSigned >= -preGapDays) & (dSigned <= postGapDays);
-        if ~any(elig), continue; end
-
-        % Find the closest
-        [~, idxRel] = min(abs(dSigned(elig)));
-        idxVec = find(elig);
-        j = idxVec(idxRel);
-
-        thisHas = hasV(j);
-        if ~(isfinite(thisHas) && (thisHas==0 || thisHas==1))
-            continue
-        end
-
-        pairs = [pairs; {JR.Patient(i), JR.Session(i), JR.EEG_Name(i), eegDate, JR.SpikeRate_perHour(i), ...
-                         vdates(j), double(thisHas), abs(dSigned(j)), string(JR.epilepsy_type(i))}]; %#ok<AGROW>
-    end
-
-    fprintf('Matched %d EEG–visit pairs under [%d days pre, %d days post].\n', ...
-        height(pairs), preGapDays, postGapDays);
-
-    % Require ≥2 pairs per patient (at least two EEG–visit pairs)
-    gc = groupcounts(pairs,'Patient');
-    keepP2 = gc.Patient(gc.GroupCount>=2);
-    pairs  = pairs(ismember(pairs.Patient, keepP2), :);
-
-    % ---------------- PER-PATIENT MEANS: HasSz==0 vs HasSz==1 ----------------
-    % Group by patient
-    [G, pid] = findgroups(double(pairs.Patient));
-
-    % patient level means for visits without seizures
-    mu0_raw = splitapply(@(y,hs) mean(y(hs==0), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G); % HasSz==0
-    mu1_raw = splitapply(@(y,hs) mean(y(hs==1), 'omitnan'), pairs.SpikeRate_perHour, pairs.HasSz, G); % HasSz==1
-
-    % number of visits of each type (has sz==1 and has sz == 0)
-    n0      = splitapply(@(hs) sum(hs==0), pairs.HasSz, G); 
-    n1      = splitapply(@(hs) sum(hs==1), pairs.HasSz, G);
-
-    % Consistency checks
-    isMu0NaN = isnan(mu0_raw);
-    isN0zero = (n0 == 0);
-    assert(isequal(isMu0NaN, isN0zero), ...
-        'Mismatch: Some patients have mu0_raw = NaN but n0 > 0, or vice versa.');
-
-    isMu1NaN = isnan(mu1_raw);
-    isN1zero = (n1 == 0);
-    assert(isequal(isMu1NaN, isN1zero), ...
-        'Mismatch: Some patients have mu1_raw = NaN but n1 > 0, or vice versa.');
-
-    % only keep patients if there are visits with seizures AND visits without seizures
-    keep = isfinite(mu0_raw) & isfinite(mu1_raw) & (n0>0) & (n1>0);
-    yNoSz_raw     = mu0_raw(keep);       % HasSz==0 mean spike rate (spikes/hour)
-    ySz_raw       = mu1_raw(keep);       % HasSz==1 mean spike rate (spikes/hour)
-    patients_kept = pid(keep); %#ok<NASGU>
-
-    Npairs = numel(ySz_raw);
-
-    % Wilcoxon sign-rank on RAW spikes/hour
-    diffs_raw   = ySz_raw - yNoSz_raw;
-    if Npairs >= 1
-        p_signrank  = signrank(ySz_raw, yNoSz_raw, 'method','approx');
-    else
-        p_signrank = NaN;
-    end
-
-    % Effect size = Hodges–Lehmann estimator (paired difference)
-    HL_raw      = median(diffs_raw, 'omitnan');        % spikes/hour
-    med0        = median(yNoSz_raw, 'omitnan');
-    med1        = median(ySz_raw,   'omitnan');
-
-    % ---------------- PLOT: log10(spikes/min) WITH JITTER + SENSITIVITY PANEL ----------------
-    % Convert raw means from spikes/hour → spikes/min
-    yNoSz_perMin = yNoSz_raw / 60;
-    ySz_perMin   = ySz_raw   / 60;
-
-    % log10(spikes/min) with EPS guard (per-minute)
-    logNoSz = log10(max(yNoSz_perMin, EPS_PLOT_perMin));
-    logSz   = log10(max(ySz_perMin,   EPS_PLOT_perMin));
-
-    jitterWidth = 0.08;   % 0.05–0.12 looks nice
-
-    % Jittered x-positions for points (but NOT for lines)
-    x0_jit = -jitterWidth/2 + jitterWidth*rand(Npairs,1);      % around 0
-    x1_jit =  1 - jitterWidth/2 + jitterWidth*rand(Npairs,1);  % around 1
-
-    % "zero spikes" line in log10(spikes/min)
-    Y_ZERO = log10(EPS_PLOT_perMin);
-
-    % Choose y-limits: a bit below Y_ZERO, a bit above max data
-    yDataMax = max([logNoSz; logSz]);
-    Y_LIMS   = [Y_ZERO - 0.4, yDataMax + 0.4];
-
-    % ---- 2-panel figure: paired plot + sensitivity ----
-    fPair = figure('Color','w','Position',[200 200 1200 580]);
-    tl = tiledlayout(fPair,1,2,'Padding','compact','TileSpacing','compact');
-
-    % ===== LEFT PANEL: PAIRED PLOT =====
-    ax1 = nexttile(tl,1);
-    hold(ax1,'on'); grid(ax1,'on'); box(ax1,'off'); set(ax1,'FontSize',16);
-
-    % Paired lines (no jitter)
-    for i = 1:Npairs
-        plot(ax1, [0 1], [logNoSz(i) logSz(i)], '-', 'Color',[0.7 0.7 0.7]);
-    end
-
-    % Jittered scatter points
-    scatter(ax1, x0_jit, logNoSz, 50, 'filled', 'MarkerFaceAlpha',0.8);
-    scatter(ax1, x1_jit, logSz,   50, 'filled', 'MarkerFaceAlpha',0.8);
-
-    % Horizontal "zero spike rate" line
-    yline(ax1, Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
-
-    % Axes / labels
-    xlim(ax1, [-0.25 1.25]);
-    ylim(ax1, Y_LIMS);
-    set(ax1,'XTick',[0 1], ...
-            'XTickLabel',{'Visits without seizures','Visits with seizures'});
-    ylabel(ax1, 'log_{10} spike rate (spikes/min)');
-    title(ax1, sprintf('All epilepsy patients — %s', segLabel), ...
-        'FontSize',18,'FontWeight','bold');
-
-    % Subtitle with HL (spikes/hour) and p
-    subtitle(ax1, sprintf(['n=%d  median HasSz=0=%.3f/hr, HasSz=1=%.3f/hr, ' ...
-                           'HL \\Delta=%.3f/hr,  p=%.3g'], ...
-        Npairs, med0, med1, HL_raw, p_signrank));
-
-    % Significance bar with p-value above the groups
-    yBar = Y_LIMS(2) - 0.07 * range(Y_LIMS);
-    tick = 0.03 * range(Y_LIMS);
-
-    plot(ax1, [0 0 1 1], [yBar - tick, yBar, yBar, yBar - tick], ...
-        'k-', 'LineWidth', 1.3);
-
-    text(ax1, 0.5, yBar + 0.02*range(Y_LIMS), ...
-         sprintf('p = %.3g', p_signrank), ...
-         'HorizontalAlignment','center', ...
-         'VerticalAlignment','bottom', ...
-         'FontSize',16, 'FontWeight','bold');
-
-    % ===== RIGHT PANEL: SENSITIVITY OF HL TO GAP WINDOWS =====
-    ax2 = nexttile(tl,2);
-    hold(ax2,'on'); grid(ax2,'on'); box(ax2,'off'); set(ax2,'FontSize',16);
-
-    % 1) Fix preGap = 365, vary postGap
-    pre_fixed   = 365;
-    %post_values = [0 1 10 15 30 45 60 90 180 365];
-    post_values = 0:10:600;
-
-    HL_post   = nan(size(post_values));
-    p_post    = nan(size(post_values));
-    N_post    = nan(size(post_values));
-
-    for k = 1:numel(post_values)
-        [HL_post(k), p_post(k), N_post(k)] = gap_effect(pre_fixed, post_values(k));
-    end
-
-    % 2) Fix postGap = 30, vary preGap
-    post_fixed = 30;
-    %pre_values = [730 365 180 60 30 15];  % as requested
-    pre_values = [600:-10:0];
-
-    HL_pre   = nan(size(pre_values));
-    p_pre    = nan(size(pre_values));
-    N_pre    = nan(size(pre_values));
-
-    for k = 1:numel(pre_values)
-        [HL_pre(k), p_pre(k), N_pre(k)] = gap_effect(pre_values(k), post_fixed);
-    end
-
-    % Plot lines
-    h1=plot(ax2, post_values, HL_post, '-o', 'LineWidth',2, 'MarkerSize',7, ...
-        'DisplayName','vary post-gap (pre=365d)');
-    h2=plot(ax2, pre_values,  HL_pre,  '-s', 'LineWidth',2, 'MarkerSize',7, ...
-        'DisplayName','vary pre-gap (post=30d)');
-
-    % Reference line at zero effect
-    yline(ax2, 0, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
-
-    % Axis labels
-    xlabel(ax2, 'Gap (days)');
-    ylabel(ax2, 'Hodges–Lehmann \Delta spike rate (spikes/hour)');
-    title(ax2, 'Sensitivity of HL to EEG–visit gap','FontSize',18,'FontWeight','bold');
-
-    % Nice limits
-    allHL = [HL_post(:); HL_pre(:)];
-    if all(isnan(allHL))
-        yMin = -1; yMax = 1;
-    else
-        yMin = min(allHL(~isnan(allHL))) - 0.2*range(allHL(~isnan(allHL)));
-        yMax = max(allHL(~isnan(allHL))) + 0.2*range(allHL(~isnan(allHL)));
-        if yMin == yMax
-            yMin = yMin - 0.5;
-            yMax = yMax + 0.5;
-        end
-    end
-    ylim(ax2, [yMin yMax]);
-
-    % Asterisks over significant points (p<0.05)
-    yr = diff(ylim(ax2));
-        % Color of each line
-    col_post = get(h1, 'Color');   % color of post-gap curve
-    col_pre  = get(h2, 'Color');   % color of pre-gap curve
-    
-    % Asterisks for post-gap line
-    for k = 1:numel(post_values)
-        if ~isnan(p_post(k)) && p_post(k) < 0.05 && ~isnan(HL_post(k))
-            text(ax2, post_values(k), HL_post(k) + 0.04*yr, '*', ...
-                'HorizontalAlignment','center', ...
-                'VerticalAlignment','bottom', ...
-                'FontSize',18, 'FontWeight','bold', ...
-                'Color', col_post);
-        end
-    end
-    
-    % Asterisks for pre-gap line
-    for k = 1:numel(pre_values)
-        if ~isnan(p_pre(k)) && p_pre(k) < 0.05 && ~isnan(HL_pre(k))
-            text(ax2, pre_values(k), HL_pre(k) + 0.04*yr, '*', ...
-                'HorizontalAlignment','center', ...
-                'VerticalAlignment','bottom', ...
-                'FontSize',18, 'FontWeight','bold', ...
-                'Color', col_pre);
-        end
-    end
-
-
-    legend(ax2,'Location','best');
-
-    % ---------------- CONSOLE SUMMARY + AUDIT ----------------
-    fprintf('\nPaired sign-rank on per-patient mean spike rates (HasSz=1 minus HasSz=0) — %s:\n', segLabel);
-    fprintf('  n patients with both states = %d\n', Npairs);
-    fprintf('  Median HasSz=0 mean spike rate      = %.3f spikes/hour\n', med0);
-    fprintf('  Median HasSz=1 mean spike rate      = %.3f spikes/hour\n', med1);
-    fprintf('  Hodges–Lehmann (HL) difference      = %.3f spikes/hour\n', HL_raw);
-    fprintf('  Wilcoxon sign-rank p                = %.3g\n', p_signrank);
-
-    if saveAudit
-        if ~exist(fileparts(pairsOut),'dir'), mkdir(fileparts(pairsOut)); end
-        writetable(pairs, pairsOut);
-        fprintf('Saved EEG–visit pairs audit to: %s\n', pairsOut);
-    end
-
-        % ======= NESTED HELPER: HL & p FOR ARBITRARY GAP SETTINGS =======
-    function [HL_gap, p_gap, N_gap] = gap_effect(preD, postD)
-        % Computes Hodges–Lehmann (HL) and Wilcoxon p-value for the same
-        % S/R cohort, but with a different asymmetric gap window:
-        %   -preD days <= (EEG_Date - VisitDate) <= postD
-        %
-        % Uses the already-built JR table (same S/R cohort) and repeats the
-        % pairing + per-patient averaging logic.
-
-        % Initialize output
-        HL_gap = NaN;
-        p_gap  = NaN;
-        N_gap  = 0;
-
-        if isempty(JR)
-            return;
-        end
-
-        % ---- Build pairs for this gap window ----
-        pairs_tmp = table('Size',[0 9], ...
-            'VariableTypes', {'double','double','string','datetime','double','datetime','double','double','string'}, ...
-            'VariableNames', {'Patient','Session','EEG_Name','EEG_Date','SpikeRate_perHour', ...
-                              'Visit_Date','HasSz','GapDays_abs','EpilepsyType'});
-
-        for ii = 1:height(JR)
-            eegDate = JR.EEG_Date(ii);
-            vdates  = JR.VisitDates{ii};
-            hasV    = JR.HasSzVec{ii};
-
-            if isempty(vdates) || isempty(hasV), continue; end
-            assert(numel(hasV)==numel(vdates))
-            nAlign = min(numel(vdates), numel(hasV));
-            if nAlign==0, continue; end
-            vdates = vdates(1:nAlign);
-            hasV   = hasV(1:nAlign);
-
-            dSigned = days(eegDate - vdates);
-            elig    = (dSigned >= -preD) & (dSigned <= postD);
-            if ~any(elig), continue; end
-
-            [~, idxRel] = min(abs(dSigned(elig)));
-            idxVec = find(elig);
-            j      = idxVec(idxRel);
-
-            thisHas = hasV(j);
-            if ~(isfinite(thisHas) && (thisHas==0 || thisHas==1))
-                continue;
-            end
-
-            pairs_tmp = [pairs_tmp; {JR.Patient(ii), JR.Session(ii), JR.EEG_Name(ii), eegDate, JR.SpikeRate_perHour(ii), ...
-                                     vdates(j), double(thisHas), abs(dSigned(j)), string(JR.epilepsy_type(ii))}]; %#ok<AGROW>
-        end
-
-        if isempty(pairs_tmp)
-            return;
-        end
-
-        % Require ≥2 pairs per patient
-        gc_tmp   = groupcounts(pairs_tmp,'Patient');
-        keepP2_t = gc_tmp.Patient(gc_tmp.GroupCount>=2);
-        pairs_tmp = pairs_tmp(ismember(pairs_tmp.Patient, keepP2_t), :);
-
-        if isempty(pairs_tmp)
-            return;
-        end
-
-        % ---- Per-patient mean spike rates for HasSz==0 vs HasSz==1 ----
-        [G_t, pid_t] = findgroups(double(pairs_tmp.Patient));
-
-        mu0_t = splitapply(@(y,hs) mean(y(hs==0), 'omitnan'), ...
-                           pairs_tmp.SpikeRate_perHour, pairs_tmp.HasSz, G_t);
-        mu1_t = splitapply(@(y,hs) mean(y(hs==1), 'omitnan'), ...
-                           pairs_tmp.SpikeRate_perHour, pairs_tmp.HasSz, G_t);
-
-        n0_t  = splitapply(@(hs) sum(hs==0), pairs_tmp.HasSz, G_t);
-        n1_t  = splitapply(@(hs) sum(hs==1), pairs_tmp.HasSz, G_t);
-
-        % keep patients with at least one 0-visit and one 1-visit
-        keep_t = isfinite(mu0_t) & isfinite(mu1_t) & (n0_t>0) & (n1_t>0);
-
-        if ~any(keep_t)
-            return;
-        end
-
-        y0_t = mu0_t(keep_t);
-        y1_t = mu1_t(keep_t);
-
-        diffs_t = y1_t - y0_t;
-        N_gap   = numel(diffs_t);
-
-        % HL = median of paired differences
-        HL_gap  = median(diffs_t, 'omitnan');
-
-        % Wilcoxon sign-rank p-value (if enough pairs)
-        if N_gap >= 1
-            p_gap = signrank(y1_t, y0_t, 'method','approx');
-        else
-            p_gap = NaN;
-        end
-    end % gap_effect
-
-end % run_paired_spikerate_by_hasSz
-
-
-function [vals_jittered, zero_idx] = jitter_zeros_log(vals, eps_val, jitter_scale)
-% jitter_zeros_log
-%    Replace zeros with epsilon and add log-scale jitter so stacked zero
-%    points separate visually on log/log plots.
-%
-% Inputs:
-%    vals          - numeric vector
-%    eps_val       - small positive epsilon to replace zeros (e.g., 1e-3)
-%    jitter_scale  - jitter magnitude (typical: 0.03–0.10)
-%
-% Outputs:
-%    vals_jittered - vector with jittered replacements for zeros
-%    zero_idx      - logical index: which elements were zero originally
-%
-% Example:
-%    [xj, xzero] = jitter_zeros_log(x, 1e-3, 0.05);
-
-    if nargin < 2 || isempty(eps_val)
-        eps_val = 1e-3;
-    end
-    if nargin < 3 || isempty(jitter_scale)
-        jitter_scale = 0.05;
-    end
-
-    % Keep original zero locations
-    zero_idx = (vals == 0);
-
-    % Replace zeros with eps
-    vals_jittered = vals;
-    vals_jittered(zero_idx) = eps_val;
-
-    % Add multiplicative (log-scale) jitter ONLY to the former zeros
-    if any(zero_idx)
-        nZ = sum(zero_idx);
-        jitter_factors = 10.^(jitter_scale * (rand(nZ,1) - 0.5));
-        vals_jittered(zero_idx) = eps_val .* jitter_factors;
     end
 end

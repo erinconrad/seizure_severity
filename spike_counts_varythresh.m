@@ -13,7 +13,7 @@ HALF_WIN  = floor(WIN_SAMP/2);
 baseThresh = 0.05:0.05:0.95;
 
 % Add the original threshold explicitly
-extraThresh = 0.43;
+extraThresh = [0.43,0.46];
 
 % Combine and ensure unique, sorted list
 threshList = unique([baseThresh, extraThresh]);

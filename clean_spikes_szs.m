@@ -9,19 +9,9 @@ To dos
 
 %% ======================= CONFIG =======================
 % Paths
-spikeSummaryCsv   = '../data/SN_counts/spike_counts_summary.csv';
+spikeSummaryCsv      = '../data/SN_counts/spike_counts_summary.csv';
 spikeSummaryMultiCsv = '../data/SN_counts/spike_counts_summary_multiThresh.csv';
-reportCsv         = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-19_1356.csv';
-
-show_intermodality_comparisons = 0; % show ambulatory vs routine
-
-% Which segment of the EEG to use for spike rates
-%   0 = whole file, 1 = first run (~1h), 2 = first 24 runs (~24h)
-which_runs  = 0;
-
-% Cohort filters
-only_amb    = 2;   % 1 = ONLY ambulatory (>=12h); 2 = ONLY routine (<=12h); 0 = all
-only_outpt  = 1;   % 1 = keep only outpatient EEGs (as defined above)
+reportCsv            = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-11-19_1356.csv';
 
 % Logic for has sz
 hassz_replace = 1; % if 1, then make visits where has Sz == 0 be 0 sz frequency & assume Has Sz == 1 -> 1 sz since last visit
@@ -31,13 +21,11 @@ NESD_LABEL = "Non-Epileptic Seizure Disorder";
 badTypes   = lower(["Uncertain if Epilepsy","Unknown or MRN not found",""]); % excluded from 'Epilepsy'
 canonical3 = ["General","Temporal","Frontal"];   % canonical 3 subtypes of epilepsy
 
-% ERIN MOVE THIS DOWN BELOW
 % Plotting params (shared)
 EPS_PER_MIN = 1e-3;                 % → dotted "zero" line at y = -3 in log10(spikes/min)
 Y_ZERO      = log10(EPS_PER_MIN);
 Y_LIMS      = [-3.2 2];             % fixed y-lims for box/swarm plots
 
-% ERIN MOVE THIS DOWN BELOW
 % Spearman-figure axes (fixed across panels)
 spearman_xLims = [-3.5, 4];         % log10(seizures/month)
 spearman_yLims = [-3, 2];           % log10(spikes/min)
@@ -79,21 +67,10 @@ acqStr_report = lower(strtrim(string(ReportTable.acquired_on)));
 %% ======================= CORE LOAD: SPIKE SUMMARY =======================
 SpikeSummaryTable = readtable(spikeSummaryCsv,'TextType','string','VariableNamingRule','preserve');
 
-switch which_runs
-    case 1
-        countCol = "FirstRun_Spikes";
-        durCol   = "FirstRun_Duration_sec";
-        segLabel = 'First run (~1h)';
-    case 2
-        countCol = "First24Runs_Spikes";
-        durCol   = "First24Runs_Duration_sec";
-        segLabel = 'First 24 runs (~24h)';
-    otherwise
-        countCol = "Total_Spikes";
-        durCol   = "Duration_sec";
-        segLabel = 'Whole file';
-end
-segLabel = string(segLabel);
+% Fixed segment: whole file
+countCol = "Total_Spikes";
+durCol   = "Duration_sec";
+
 
 SpikeSummaryTable = ensure_spikerates(SpikeSummaryTable, countCol, durCol);   % adds SpikeRate_perHour/SpikeRate_perMin
 
