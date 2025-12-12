@@ -122,7 +122,7 @@ for i = 1:height(ReportTable)
         end
 
     else
-        error('weird format)')
+        error('weird format')
     end
 
     % ---------- 2) Decode the other arrays ----------
@@ -153,7 +153,7 @@ for i = 1:height(ReportTable)
     len_sz    = numel(sz_cell);
     len_hs    = numel(hs_cell);
 
-    n_all = min([len_vt, len_dates, len_sz, len_hs]);
+    n_all = len_vt;
 
     if n_all == 0
         % No usable visits → wipe the row to consistent empty lists
@@ -309,7 +309,7 @@ fprintf('[Outpatient+routine filter] Kept %d spike rows and %d report rows.\n', 
 
 %% ======================= RESTRICT TO STUDY TYPE (ROUTINE-ONLY VIEW) =======================
 Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, SzFreqPerPatient, ...
-                            countCol, durCol, NESD_LABEL, badTypes, canonical3);
+                            NESD_LABEL, badTypes, canonical3);
 
 %% ======================= PATIENT-LEVEL: SEX (EPILEPSY ONLY) SPIKES + SEIZURES =======================
 % Two-panel figure:
@@ -784,19 +784,19 @@ EpTable    = table(EpPatients, 'VariableNames', {'Patient'});
 
 % Join with seizure frequencies (Rule 1 only: MeanSzFreq)
 % SzFreqPerPatient has columns: Patient, MeanSzFreq, MeanSzFreq_rule12, MeanSzFreq_raw
-S3 = innerjoin(SzFreqPerPatient, ReportPerPatient, 'Keys','Patient');
+S2 = innerjoin(SzFreqPerPatient, ReportPerPatient, 'Keys','Patient');
 
 % Restrict to epilepsy-only
-S3 = innerjoin(S3, EpTable, 'Keys','Patient');
+S2 = innerjoin(S2, EpTable, 'Keys','Patient');
 
 % Define groups:
 %   Group 1: ALL EEGs with reports have "absent" AND none have "present"
 %   Group 2: AT LEAST ONE EEG with "present" (regardless of whether some are "absent")
-mask_allAbsent  =  S3.HasAbsent & ~S3.HasPresent;
-mask_anyPresent =  S3.HasPresent;
+mask_allAbsent  =  S2.HasAbsent & ~S2.HasPresent;
+mask_anyPresent =  S2.HasPresent;
 
-freq_allAbsent  = S3.MeanSzFreq(mask_allAbsent);
-freq_anyPresent = S3.MeanSzFreq(mask_anyPresent);
+freq_allAbsent  = S2.MeanSzFreq(mask_allAbsent);
+freq_anyPresent = S2.MeanSzFreq(mask_anyPresent);
 
 % Drop NaNs (patients with no usable seizure frequency under Rule 1)
 freq_allAbsent  = freq_allAbsent(isfinite(freq_allAbsent));
@@ -806,9 +806,9 @@ n_allAbsent  = numel(freq_allAbsent);
 n_anyPresent = numel(freq_anyPresent);
 
 % Wilcoxon rank-sum test
-p_rankSum_S3 = NaN;
+p_rankSum_S2 = NaN;
 if n_allAbsent >= 1 && n_anyPresent >= 1
-    p_rankSum_S3 = ranksum(freq_allAbsent, freq_anyPresent, 'method','approx');
+    p_rankSum_S2 = ranksum(freq_allAbsent, freq_anyPresent, 'method','approx');
 end
 
 % Medians, IQRs, and effect size (Cliff's delta)
@@ -818,60 +818,60 @@ iqr_allAbsent = prctile(freq_allAbsent,[25,75]);
 m_anyPresent   = median(freq_anyPresent,'omitnan');
 iqr_anyPresent = prctile(freq_anyPresent,[25,75]);
 
-effectS3_cliff = cliff_delta(freq_anyPresent, freq_allAbsent);
+effectS2_cliff = cliff_delta(freq_anyPresent, freq_allAbsent);
 
 
 % ----- Plot log10(seizures/month) with eps floor and jitter -----
 % Use a small epsilon for seizure frequency, similar spirit to Spearman plotting
 EPS_FREQ = 1e-3;   % 0.01 seizures/month floor
-Y_S3_ZERO = log10(EPS_FREQ);
-Y_S3_LIMS = spearman_xLims;   % reuse seizure-frequency axis limits
+Y_S2_ZERO = log10(EPS_FREQ);
+Y_S2_LIMS = spearman_xLims;   % reuse seizure-frequency axis limits
 
-Y_S3 = [to_log10_per_month(freq_allAbsent,  EPS_FREQ); ...
+Y_S2 = [to_log10_per_month(freq_allAbsent,  EPS_FREQ); ...
         to_log10_per_month(freq_anyPresent, EPS_FREQ)];
-Y_S3 = add_y_jitter_eps(Y_S3, Y_S3_ZERO, Y_S3_LIMS, 0.02);  % ~±1% of y-range
+Y_S2 = add_y_jitter_eps(Y_S2, Y_S2_ZERO, Y_S2_LIMS, 0.02);  % ~±1% of y-range
 
-G_S3 = [repmat("All EEGs: no spikes",   n_allAbsent, 1); ...
+G_S2 = [repmat("All EEGs: no spikes",   n_allAbsent, 1); ...
         repmat("≥1 EEG: spikes present", n_anyPresent, 1)];
 
 % Draw figure
-fS3 = figure('Color','w','Position',[100 100 700 500]);
-axS3 = axes(fS3); hold(axS3,'on'); box(axS3,'off'); grid(axS3,'on');
+fS2 = figure('Color','w','Position',[100 100 700 500]);
+axS2 = axes(fS2); hold(axS2,'on'); box(axS2,'off'); grid(axS2,'on');
 
-boxchart(axS3, categorical(G_S3), Y_S3, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
-swarmchart(axS3, categorical(G_S3), Y_S3, 18, 'filled','MarkerFaceAlpha',0.25);
+boxchart(axS2, categorical(G_S2), Y_S2, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
+swarmchart(axS2, categorical(G_S2), Y_S2, 18, 'filled','MarkerFaceAlpha',0.25);
 
-yline(axS3, Y_S3_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
-ylim(axS3, Y_S3_LIMS);
-ylabel(axS3, 'log_{10}(seizures/month)');
-title(axS3, 'Fig. S3. Mean seizure frequency by reported spikes across EEGs');
+yline(axS2, Y_S2_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+ylim(axS2, Y_S2_LIMS);
+ylabel(axS2, 'log_{10}(seizures/month)');
+title(axS2, 'Fig. S2. Mean seizure frequency by reported spikes across EEGs');
 
 % Significance bar
-if ~isnan(p_rankSum_S3)
-    yTop  = Y_S3_LIMS(2);
-    ySig  = yTop - 0.08 * range(Y_S3_LIMS);
-    if p_rankSum_S3 < 0.001
+if ~isnan(p_rankSum_S2)
+    yTop  = Y_S2_LIMS(2);
+    ySig  = yTop - 0.08 * range(Y_S2_LIMS);
+    if p_rankSum_S2 < 0.001
         pLabel = 'p < 0.001';
     else
-        pLabel = sprintf('p = %.3g', p_rankSum_S3);
+        pLabel = sprintf('p = %.3g', p_rankSum_S2);
     end
-    add_sigbar(axS3, 1, 2, ySig, pLabel);
+    add_sigbar(axS2, 1, 2, ySig, pLabel);
 end
 
-set(axS3,'FontSize',20);
+set(axS2,'FontSize',20);
 
 % Custom x tick labels with N
-labelsS3 = string(axS3.XTickLabel);
-labelsS3(labelsS3=="All EEGs: no spikes") = ...
+labelsS2 = string(axS2.XTickLabel);
+labelsS2(labelsS2=="All EEGs: no spikes") = ...
     sprintf('All EEGs: no spikes (N=%d)', n_allAbsent);
-labelsS3(labelsS3=="≥1 EEG: spikes present") = ...
+labelsS2(labelsS2=="≥1 EEG: spikes present") = ...
     sprintf('\x2265 1 EEG: spikes present (N=%d)', n_anyPresent);  % ≥ if it renders; otherwise ">= 1"
-axS3.XTickLabel = labelsS3;
-axS3.XTickLabelRotation = 15;
+axS2.XTickLabel = labelsS2;
+axS2.XTickLabelRotation = 15;
 
 % Save figure
 if ~exist(fileparts(figS2_out),'dir'), mkdir(fileparts(figS2_out)); end
-exportgraphics(fS3, figS2_out, 'Resolution', 300);
+exportgraphics(fS2, figS2_out, 'Resolution', 300);
 fprintf('Saved Fig S2: %s\n', figS2_out);
 
 %% ======================= TABLE 1: COHORT CHARACTERISTICS =======================
@@ -1544,7 +1544,7 @@ Y_S3_ZERO = log10(EPS_FREQ);
 
 % Light grey paired lines
 for i = 1:nPairs
-    plot(axP, [1 2], [low_freq_log, high_freq_log], '-', ...
+    plot(axP, [1 2], [low_freq_log(i), high_freq_log(i)], '-', ...
         'Color', [0.7 0.7 0.7], 'LineWidth', 1.2);
 end
 
@@ -1846,7 +1846,7 @@ end
 
 
 function Views = build_filtered_view(SessionsFiltered, ReportIn, PatientTypingAll, SzFreqPerPatient, ...
-                                     countCol, durCol, NESD_LABEL, badTypes, canonical3)
+                                     NESD_LABEL, badTypes, canonical3)
 % build_filtered_view
 %   Bundle all "view building" into one place:
 %     - Filter report rows to sessions in SessionsIn
