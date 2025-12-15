@@ -18,6 +18,9 @@ canonical3 = ["General","Temporal","Frontal"];   % canonical 3 subtypes of epile
 EPS_RATE = 30e-3;                 % → dotted "zero" line at y = -3 in log10(spikes/min)
 Y_ZERO      = log10(EPS_RATE);
 Y_LIMS      = [-2 4];             % fixed y-lims for box/swarm plots
+nBoot = 5000; alpha = 0.05;
+TITLE_Y_OFFSET = 0.02;
+
 
 % Spearman-figure axes (fixed across panels)
 spearman_xLims = [-3.5, 4];         % log10(seizures/month)
@@ -644,11 +647,21 @@ tiledlayout(f1,1,3,'TileSpacing','compact','Padding','loose');
 % A) Report Present vs Absent
 axA = nexttile; hold(axA,'on'); box(axA,'off'); grid(axA,'on');
 boxchart(axA, categorical(G_A), Y_A, 'BoxFaceAlpha',0.25,'MarkerStyle', 'none');
-swarmchart(axA, categorical(G_A), Y_A, 18, 'filled','MarkerFaceAlpha',0.25);    
+swarmchart(axA, categorical(G_A), Y_A, 18, 'filled','MarkerFaceAlpha',0.18);    
 yline(axA, Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 ylim(axA, Y_LIMS);
-ylabel(axA, 'log_{10}(spikes/hour)');
-title(axA, 'A. Reported presence or absence of spikes');
+ylabel(axA, 'Spikes/hour (log scale)');
+set_log10_ticks(axA, 'y', EPS_RATE, Y_LIMS);
+
+% Plot 95% CI (bootsrapped) for medians)
+[med_abs, lo_abs, hi_abs] = bootstrap_median_ci(x_abs, nBoot, alpha);  % raw spikes/hour
+add_median_ci_overlay(axA, 1, med_abs, lo_abs, hi_abs, EPS_RATE);      % draws on log10 axis
+
+[med_pre, lo_pre, hi_pre] = bootstrap_median_ci(x_pre, nBoot, alpha);
+add_median_ci_overlay(axA, 2, med_pre, lo_pre, hi_pre, EPS_RATE);
+
+t=title(axA, 'A. Reported presence or absence of spikes');
+
 if p_rankSum_A < 0.001
     add_sigbar(axA, 1, 2, Y_LIMS(2) - 0.08*range(Y_LIMS), sprintf('p < 0.001'));
 else
@@ -661,15 +674,18 @@ labelsA(labelsA=="Absent") = sprintf('Absent (N=%d)', nnz(isfinite(x_abs)));
 labelsA(labelsA=="Present")     = sprintf('Present (N=%d)', nnz(isfinite(x_pre)));  
 axA.XTickLabel = labelsA;
 axA.XTickLabelRotation = 20;   
+t.Units = 'normalized';
+t.Position(2) = t.Position(2) + TITLE_Y_OFFSET;
 
 % B) Epilepsy vs NESD
 axB = nexttile; hold(axB,'on'); box(axB,'off'); grid(axB,'on');
 boxchart(axB, categorical(G_B), Y_B, 'BoxFaceAlpha',0.25,'MarkerStyle', 'none');
-swarmchart(axB, categorical(G_B), Y_B, 18, 'filled','MarkerFaceAlpha',0.25);    
+swarmchart(axB, categorical(G_B), Y_B, 18, 'filled','MarkerFaceAlpha',0.18);    
 yline(axB, Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 ylim(axB, Y_LIMS);
-ylabel(axB, 'log_{10}(spikes/hour)');
-title(axB, 'B. Epilepsy versus NESD');
+ylabel(axB, 'Spikes/hour (log scale)');
+set_log10_ticks(axB, 'y', EPS_RATE, Y_LIMS);
+t = title(axB, 'B. Epilepsy versus NESD');
 if p_rankSum_B < 0.001
     add_sigbar(axB, 1, 2, Y_LIMS(2) - 0.08*range(Y_LIMS), sprintf('p < 0.001'));
 else
@@ -677,23 +693,46 @@ else
 end
 set(axB,'FontSize',20);
 
+% Plot 95% CI (bootsrapped) for medians)
+[med_ep, lo_ep, hi_ep] = bootstrap_median_ci(x_ep, nBoot, alpha);  % raw spikes/hour
+add_median_ci_overlay(axB, 1, med_ep, lo_ep, hi_ep, EPS_RATE);      % draws on log10 axis
+
+[med_nes, lo_nes, hi_nes] = bootstrap_median_ci(x_nes, nBoot, alpha);
+add_median_ci_overlay(axB, 2, med_nes, lo_nes, hi_nes, EPS_RATE);
+
 
 labelsB = string(axB.XTickLabel); 
 labelsB(labelsB=="Epilepsy") = sprintf('Epilepsy (N=%d)', n_ep);
 labelsB(labelsB=="NESD")     = sprintf('NESD (N=%d)', n_nes);  
 axB.XTickLabel = labelsB;
 axB.XTickLabelRotation = 20;  
-
+t.Units = 'normalized';
+t.Position(2) = t.Position(2) + TITLE_Y_OFFSET;
 
 % C) General vs Temporal vs Frontal
 axC = nexttile; hold(axC,'on'); box(axC,'off'); grid(axC,'on');
 boxchart(axC, SubtypeSubsetTable.EpiType4, Y_C, 'BoxFaceAlpha',0.25,'MarkerStyle', 'none');
-swarmchart(axC, SubtypeSubsetTable.EpiType4, Y_C, 18, 'filled','MarkerFaceAlpha',0.25);   
+swarmchart(axC, SubtypeSubsetTable.EpiType4, Y_C, 18, 'filled','MarkerFaceAlpha',0.18);   
 yline(axC, Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 ylim(axC, Y_LIMS);
-ylabel(axC, 'log_{10}(spikes/hour)');
-title(axC, 'C. Epilepsy subtype');
-set(axC,'FontSize',20);
+ylabel(axC, 'Spikes/hour (log scale)');
+set_log10_ticks(axC, 'y', EPS_RATE, Y_LIMS);
+t = title(axC, 'C. Epilepsy subtype');
+
+sub_ci = nan(3,3);
+
+for i = 1:numel(canonical3)
+    g = canonical3(i);
+
+    x_raw = SubtypeSubsetTable.MeanSpikeRate_perHour( SubtypeSubsetTable.EpiType4 == g );
+    x_raw = x_raw(isfinite(x_raw));
+
+    [med, lo, hi] = bootstrap_median_ci(x_raw, nBoot, alpha);
+    sub_ci(i,1) = med; sub_ci(i,2) = lo; sub_ci(i,3) = hi;
+
+    % draw a simple vertical segment + dot on log10 axis
+    add_median_ci_overlay(axC, i, med, lo, hi, EPS_RATE);
+end
 
 
 set(axC,'FontSize',20);
@@ -726,6 +765,8 @@ for i = 1:3
     add_sigbar(axC, x1, x2, y0 - (i-1)*yStep, lab);
 end
 
+t.Units = 'normalized';
+t.Position(2) = t.Position(2) + TITLE_Y_OFFSET;
 if ~exist(fileparts(fig1_out),'dir'), mkdir(fileparts(fig1_out)); end
 exportgraphics(f1, fig1_out, 'Resolution', 300);
 fprintf('Saved Fig 1 (controls): %s\n', fig1_out);
@@ -737,14 +778,14 @@ PatientSpikeSz_All   = Views.PatientSpikeSz_All;
 PatientSpikeSz_Typed = Views.PatientSpikeSz_Typed;
 
 % Figure 2
-[SpearmanResults_main, rs_all_main, p_all_main, n_all_main] = ...
+[SpearmanResults_main, rs_all_main, p_all_main, n_all_main,rho_lo_main, rho_hi_main, subtype_ci_main] = ...
     spearman_plotting_function(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
         canonical3, spearman_xLims, spearman_yLims, ...
         fig2_out, ...
         'MeanSzFreq', '', false);
 
 % Supplemental figure 1
-[SpearmanResults_nz, rs_all_nz, p_all_nz, n_all_nz] = ...
+[SpearmanResults_nz, rs_all_nz, p_all_nz, n_all_nz,rho_lo_nz, rho_hi_nz, subtype_ci_nz] = ...
     spearman_plotting_function(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
         canonical3, spearman_xLims, spearman_yLims, ...
         figS1_out, ...
@@ -818,6 +859,7 @@ iqr_allAbsent = prctile(freq_allAbsent,[25,75]);
 m_anyPresent   = median(freq_anyPresent,'omitnan');
 iqr_anyPresent = prctile(freq_anyPresent,[25,75]);
 
+
 effectS2_cliff = cliff_delta(freq_anyPresent, freq_allAbsent);
 
 
@@ -839,12 +881,21 @@ fS2 = figure('Color','w','Position',[100 100 700 500]);
 axS2 = axes(fS2); hold(axS2,'on'); box(axS2,'off'); grid(axS2,'on');
 
 boxchart(axS2, categorical(G_S2), Y_S2, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
-swarmchart(axS2, categorical(G_S2), Y_S2, 18, 'filled','MarkerFaceAlpha',0.25);
+swarmchart(axS2, categorical(G_S2), Y_S2, 18, 'filled','MarkerFaceAlpha',0.18);
+
+% Plot 95% CI (bootsrapped) for medians)
+[med_s2_pre, lo_s2_pre, hi_s2_pre] = bootstrap_median_ci(freq_anyPresent, nBoot, alpha);  
+add_median_ci_overlay(axS2, 1, med_s2_pre, lo_s2_pre, hi_s2_pre, EPS_RATE);    
+
+[med_s2_abs, lo_s2_abs, hi_s2_abs] = bootstrap_median_ci(freq_allAbsent, nBoot, alpha);
+add_median_ci_overlay(axS2, 2, med_s2_abs, lo_s2_abs, hi_s2_abs, EPS_RATE);
 
 yline(axS2, Y_S2_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 ylim(axS2, Y_S2_LIMS);
-ylabel(axS2, 'log_{10}(seizures/month)');
-title(axS2, 'Fig. S2. Mean seizure frequency by reported spikes across EEGs');
+ylabel(axS2, 'Seizures/month (log scale)');
+set_log10_ticks(axS2, 'y', EPS_FREQ, Y_S2_LIMS);
+
+t = title(axS2, 'Mean seizure frequency by reported spikes across EEGs');
 
 % Significance bar
 if ~isnan(p_rankSum_S2)
@@ -868,6 +919,8 @@ labelsS2(labelsS2=="≥1 EEG: spikes present") = ...
     sprintf('\x2265 1 EEG: spikes present (N=%d)', n_anyPresent);  % ≥ if it renders; otherwise ">= 1"
 axS2.XTickLabel = labelsS2;
 axS2.XTickLabelRotation = 15;
+t.Units = 'normalized';
+t.Position(2) = t.Position(2) + TITLE_Y_OFFSET;
 
 % Save figure
 if ~exist(fileparts(figS2_out),'dir'), mkdir(fileparts(figS2_out)); end
@@ -1012,6 +1065,8 @@ sf_vec   = SzP_join.MeanSzFreq;
 sf_vec   = sf_vec(isfinite(sf_vec));
 sf_med   = median(sf_vec,'omitnan');
 sf_q     = prctile(sf_vec,[25,75]);
+[sf_med_hat, sf_ci_lo, sf_ci_hi] = bootstrap_median_ci(sf_vec, 5000, 0.05);
+
 
 % ---------- 9. Mean spike rate per patient (median, IQR) ----------
 % Use MeanSpikeRate_perHour (spikes/hour)
@@ -1019,6 +1074,8 @@ sr_vec = PL.MeanSpikeRate_perHour;
 sr_vec = sr_vec(isfinite(sr_vec));
 sr_med = median(sr_vec,'omitnan');
 sr_q   = prctile(sr_vec,[25,75]);
+[sr_med_hat, sr_ci_lo, sr_ci_hi] = bootstrap_median_ci(sr_vec, 5000, 0.05);
+
 
 % ---------- 10. Reported spikes per EEG (Present / Absent / Unknown) ----------
 % Use ReportSlim and same logic as Fig S3 but per patient
@@ -1560,7 +1617,7 @@ scatter(axP, x_high, high_freq_log, 30, 'filled', 'MarkerFaceAlpha', 0.6);
 xlim(axP, [0.5 2.5]);
 xticks(axP, [1 2]);
 xticklabels(axP, {'Low-spike EEG','High-spike EEG'});
-ylabel(axP, 'log_{10}(seizures/month)', 'FontSize', 14);
+ylabel(axP, 'Seizures/month (log scale)', 'FontSize', 14);
 
 
 % Add a significance bar using your add_sigbar helper if available
@@ -1568,6 +1625,8 @@ ylabel(axP, 'log_{10}(seizures/month)', 'FontSize', 14);
 yMax = max([low_freq_log; high_freq_log]) * 1.4;
 yMin = min([low_freq_log; high_freq_log]) * 1.2;
 ylim(axP, [yMin, yMax]);
+set_log10_ticks(axP, 'y', EPS_FREQ, [yMin yMax]);
+
 ySig = yMax - 0.2*(yMax);
 if p_signed < 0.001
     pLabel = 'p < 0.001';
@@ -1604,12 +1663,12 @@ fprintf(fid, '<h1>Spike Rate and Seizure Frequency Results Summary</h1>\n');
 fprintf(fid, '<h2>Cohort summary</h2>\n');
 fprintf(fid,['<p>We included %d patients with at least one outpatient routine EEG '...
     '(%d EEGs). %d patients (%1.1f%%) carried a '...
-    'diagnosis of epilepsy. Median (IQR) monthly seizure frequency was '...
-    '%1.2f (%1.2f-%1.2f), and median (IQR) spikes/hour across EEGs '...
-    'was %1.2f (%1.2f-%1.2f) (Table 1).</p>'],...
+    'diagnosis of epilepsy. Median [95%% CI] monthly seizure frequency was '...
+    '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
+    'was %1.2f [%1.2f-%1.2f] (Table 1).</p>'],...
     N_total,n_eegs_all,n_epi,n_epi/N_total*100,...
-    sf_med,sf_q(1), sf_q(2),...
-    sr_med, sr_q(1), sr_q(2));
+    sf_med,sf_ci_lo, sf_ci_hi,...
+    sr_med, sr_ci_lo, sr_ci_hi);
 
 
 %% ---- Figure 1: Control Panels ----
@@ -1619,37 +1678,37 @@ fprintf(fid, '<h2>Spike rates by patient groups</h2>\n');
 % Panel A
 pA_str = format_p_html(p_rankSum_A);
 fprintf(fid,['<p>Automatically detected spike rates were higher in EEGs with clinically-reported spikes '...
-            '(median spike rate %.2f (%.2f-%.2f) spikes/hour) than '...
-            'those without reported spikes (%.2f (%.2f-%.2f) '...
+            '(median spike rate %.2f [95%% CI %.2f-%.2f] spikes/hour) than '...
+            'those without reported spikes (%.2f [%.2f-%.2f] '...
             'spikes/hour) (%s, Cliff''s &delta; = %.2f; Fig. 1A). '],...
-            m_pre,iqr_pre(1),iqr_pre(2),m_abs,...
-            iqr_abs(1),iqr_abs(2),pA_str,effectA_cliff);
+            m_pre,lo_pre,hi_pre,m_abs,...
+            lo_abs,hi_abs,pA_str,effectA_cliff);
 
 
 % Panel B
 pB_str = format_p_html(p_rankSum_B);
 fprintf(fid,['Patients with epilepsy also had higher spike rates '...
-            '(%.2f (%.2f-%.2f) spikes/hour) than those '...
-            'with NESD (%.2f (%.2f-%.2f) spikes/hour) '...
+            '(%.2f [%.2f-%.2f] spikes/hour) than those '...
+            'with NESD (%.2f [%.2f-%.2f] spikes/hour) '...
             '(%s, &delta; = %.2f; Fig. 1B). '],...
-            m_ep,iqr_ep(1),iqr_ep(2),m_nes,...
-            iqr_nes(1),iqr_nes(2),pB_str,effectB_cliff);
+            m_ep,lo_ep,hi_ep,m_nes,...
+            lo_nes,hi_nes,pB_str,effectB_cliff);
 
 % Panel C
 fprintf(fid,['Spike rates differed across epilepsy subtypes (Kruskal–Wallis '...
             '%s, η² ≈ %.3f). '],format_p_html(p_kw_C),eta2_kw_C);
 
 fprintf(fid,['Generalized epilepsy demonstrated higher spike rates '...
-            '(%.2f (%.2f-%.2f)) than temporal '...
-            '(%.2f (%.2f-%.2f); Bonferroni-adjusted '...
+            '(%.2f [%.2f-%.2f]) than temporal '...
+            '(%.2f [%.2f-%.2f]; Bonferroni-adjusted '...
             '%s) and frontal '...
-            '(%.2f (%.2f-%.2f); '...
+            '(%.2f [%.2f-%.2f]; '...
             '%s). The temporal versus frontal comparison '...
             'was not significant (%s; Fig. 1C).</p>'],...
-            SubtypeStatsTable.Median(1),SubtypeStatsTable.P25(1),SubtypeStatsTable.P75(1),...
-            SubtypeStatsTable.Median(2),SubtypeStatsTable.P25(2),SubtypeStatsTable.P75(2),...
+            SubtypeStatsTable.Median(1),sub_ci(1,2),sub_ci(1,3),...
+            SubtypeStatsTable.Median(2),sub_ci(2,2),sub_ci(2,3),...
             format_p_html(p_pair_bonf(1)),...
-            SubtypeStatsTable.Median(3),SubtypeStatsTable.P25(3),SubtypeStatsTable.P75(3),...
+            SubtypeStatsTable.Median(3),sub_ci(3,2),sub_ci(3,3),...
             format_p_html(p_pair_bonf(2)),...
             format_p_html(p_pair_bonf(3)));
 
@@ -1663,15 +1722,18 @@ fprintf(fid, '<h2>Relationship between spike rate and seizure frequency</h2>\n')
 
 fprintf(fid,['<p>Across all epilepsy patients (N = %d), spike rate '...
     'and seizure frequency were positively correlated '...
-    '(&rho; = %.2f, %s).'],n_all_main,rs_all_main,format_p_html(p_all_main));
+    '(&rho; = %.2f [95%% CI %.2f-%.2f], %s).'],n_all_main,rs_all_main,rho_lo_main,rho_hi_main,format_p_html(p_all_main));
 
 fprintf(fid,[' Subtype-specific correlations were significant for generalized epilepsy '...
-    '(N = %d, &rho; = %.2f, Bonferroni-adjusted %s) and '...
-    'temporal lobe epilepsy (N = %d, &rho; = %.2f, %s), but not frontal '...
-    'lobe epilepsy (N = %d, &rho; = %.2f, %s; Fig 2A-D). '],...
-    SpearmanResults_main.N(1),SpearmanResults_main.Spearman_r(1),format_p_html(SpearmanResults_main.p_bonf(1)),...
-    SpearmanResults_main.N(2),SpearmanResults_main.Spearman_r(2),format_p_html(SpearmanResults_main.p_bonf(2)),...
-    SpearmanResults_main.N(3),SpearmanResults_main.Spearman_r(3),format_p_html(SpearmanResults_main.p_bonf(3)));
+    '(N = %d, &rho; = %.2f [%.2f-%.2f], Bonferroni-adjusted %s) and '...
+    'temporal lobe epilepsy (N = %d, &rho; = %.2f [%.2f-%.2f], %s), but not frontal '...
+    'lobe epilepsy (N = %d, &rho; = %.2f [%.2f-%.2f], %s; Fig 2A-D). '],...
+    SpearmanResults_main.N(1),SpearmanResults_main.Spearman_r(1),...
+    subtype_ci_main.ci_lo(1),subtype_ci_main.ci_hi(1),format_p_html(SpearmanResults_main.p_bonf(1)),...
+    SpearmanResults_main.N(2),SpearmanResults_main.Spearman_r(2),...
+     subtype_ci_main.ci_lo(2),subtype_ci_main.ci_hi(2),format_p_html(SpearmanResults_main.p_bonf(2)),...
+    SpearmanResults_main.N(3),SpearmanResults_main.Spearman_r(3),...
+     subtype_ci_main.ci_lo(3),subtype_ci_main.ci_hi(3),format_p_html(SpearmanResults_main.p_bonf(3)));
 
 fprintf(fid,['Results were consistent when restricting analyses to '...
     'patients with non-zero spike rates and seizure frequencies (Fig. S1). ']);
@@ -1684,14 +1746,16 @@ fprintf(fid,['Together, these findings indicate that spike burden reflects seizu
 
 
 %% Paired analysis
+[medLow,  loLow,  hiLow]  = bootstrap_median_ci(Freq_low(isfinite(Freq_low)),   5000, 0.05);
+[medHigh, loHigh, hiHigh] = bootstrap_median_ci(Freq_high(isfinite(Freq_high)), 5000, 0.05);
 
 fprintf(fid,['Among %d patients with multiple EEGs-clinic visit pairs, '...
     'seizure frequency did not differ significantly between periods '...
     'near low- versus high-spike-rate EEGs '...
-    '(%1.1f (%1.1f-%1.1f) vs %1.1f (%1.1f-%1.1f) seizures/month; '...
+    '(%1.1f [%1.1f-%1.1f)] vs %1.1f [%1.1f-%1.1f] seizures/month; '...
     'W = %1.1f, %s; Fig. S3).</p>'],...
-    nPairs,median(Freq_low,'omitnan'),prctile(Freq_low,25),prctile(Freq_low,75),...
-    median(Freq_high,'omitnan'),prctile(Freq_high,25),prctile(Freq_high,75),...
+    nPairs,median(Freq_low,'omitnan'),loLow,hiLow,...
+    median(Freq_high,'omitnan'),loHigh,hiHigh,...
     stats_signed.signedrank,format_p_html(p_signed));
 
 fprintf(fid, '</body></html>\n');
@@ -2051,7 +2115,7 @@ end
 
 
 
-function [SpearmanResults, rs_all, p_all, n_all] = ...
+function [SpearmanResults, rs_all, p_all, n_all, rho_lo, rho_hi, subtype_ci] = ...
     spearman_plotting_function(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
                               canonical3, spearman_xLims, spearman_yLims, ...
                               fig_out, ...
@@ -2077,10 +2141,20 @@ n_all = sum(mask_all);
 [rs_all, p_all] = corr(x_all(mask_all), y_all(mask_all), ...
     'Type','Spearman','Rows','complete');
 
+[rho_all, rho_lo, rho_hi] = bootstrap_spearman_ci( ...
+    x_all(mask_all), y_all(mask_all), 5000, 0.05);
+
 
 %% ---- By group (Frontal / Temporal / General) ----
+% ---- By group (Frontal / Temporal / General) ----
 rowsOut = {};
-for g = canonical3
+
+subtype_ci = table(string(canonical3(:)), nan(numel(canonical3),1), nan(numel(canonical3),1), nan(numel(canonical3),1), ...
+    'VariableNames', {'Group','rho','ci_lo','ci_hi'});
+
+for ii = 1:numel(canonical3)
+    g = canonical3(ii);
+
     mBase = (PatientSpikeSz_Typed.EpiType3 == g);
     x = PatientSpikeSz_Typed.MeanSpikeRate_perHour(mBase);
     y = PatientSpikeSz_Typed.(freqFieldName)(mBase);
@@ -2091,10 +2165,22 @@ for g = canonical3
     end
 
     n = sum(mask);
+
     [rs, p] = corr(x(mask), y(mask), 'Type','Spearman','Rows','complete');
- 
+
+    if n >= 3
+        [rho, lo, hi] = bootstrap_spearman_ci(x(mask), y(mask), 5000, 0.05);
+    else
+        rho = NaN; lo = NaN; hi = NaN;
+    end
+
+    subtype_ci.rho(ii)   = rho;
+    subtype_ci.ci_lo(ii) = lo;
+    subtype_ci.ci_hi(ii) = hi;
+
     rowsOut(end+1,:) = {char(g), n, rs, p}; %#ok<SAGROW>
 end
+
 
 SpearmanResults = cell2table(rowsOut, ...
     'VariableNames', {'Group','N','Spearman_r','p_raw'});
@@ -2184,16 +2270,18 @@ if n_all >= 3
 end
 
 xlim(axA2, xLims); ylim(axA2, yLims);
-xlabel(axA2,'log_{10} Seizures per month','FontSize',fontL);
-ylabel(axA2,'log_{10} Spikes per hour','FontSize',fontL);
+xlabel(axA2,'Seizures per month (log scale)','FontSize',fontL);
+ylabel(axA2,'Spikes per hour (log scale)','FontSize',fontL);
+set_log10_ticks(axA2, 'x', eps_sz,   xLims);
+set_log10_ticks(axA2, 'y', eps_rate, yLims);
 
 title(axA2, sprintf('A. All epilepsy%s (N=%d)', labelSuffix, n_all), ...
     'FontSize',fontL, 'FontWeight','bold');
 
 if p_all < 0.001
-    txtA = sprintf('ρ=%.2f, p<0.001', rs_all);
+    txtA = sprintf('ρ=%.2f [%.2f-%.2f], p<0.001', rs_all,rho_lo,rho_hi);
 else
-    txtA = sprintf('ρ=%.2f, p=%.2g', rs_all, p_all);
+    txtA = sprintf('ρ=%.2f [%.2f-%.2f], p=%.2g', rs_all,rho_lo,rho_hi,p_all);
 end
 text(axA2, 0.98, 0.95, txtA, 'Units','normalized', ...
      'HorizontalAlignment','right','VerticalAlignment','top', ...
@@ -2263,10 +2351,14 @@ for p = 1:3
     xlim(ax, xLims); ylim(ax, yLims);
 
     row = SpearmanResults(strcmp(SpearmanResults.Group, string(panelOrder{p})), :);
+    gName = string(panelOrder{p});
+    rowCI = subtype_ci(subtype_ci.Group == gName, :);
+
+
     if row.p_bonf < 0.001
-        txt = sprintf('ρ=%.2f, p_{bonf}<0.001', row.Spearman_r);
+        txt = sprintf('ρ=%.2f [%.2f-%.2f], p_{bonf}<0.001', row.Spearman_r,rowCI.ci_lo,rowCI.ci_hi);
     else
-        txt = sprintf('ρ=%.2f, p_{bonf}=%.2g', row.Spearman_r, row.p_bonf);
+        txt = sprintf('ρ=%.2f [%.2f-%.2f], p_{bonf}=%.2g', row.Spearman_r,rowCI.ci_lo,rowCI.ci_hi, row.p_bonf);
     end
 
     xlabel(ax,'log_{10} Seizures per month','FontSize',fontL);
@@ -2480,4 +2572,113 @@ function out = local_min_omitnan(a)
     else
         out = min(a);
     end
+end
+function set_log10_ticks(ax, whichAxis, eps_val, axisLims, maxPow)
+% set_log10_ticks
+%   Generic helper to label a linear axis whose data are log10-transformed.
+%
+%   Example use cases:
+%     - log10(spikes/hour) with eps floor → ticks: 0,1,10,100,...
+%     - log10(seizures/month) with eps floor → ticks: 0,1,10,100,...
+%
+% Inputs:
+%   ax        : axis handle
+%   whichAxis: 'x' or 'y'
+%   eps_val  : epsilon floor used before log10 (e.g., EPS_RATE)
+%   axisLims : axis limits in log10 space (e.g., Y_LIMS or X_LIMS)
+%   maxPow   : optional max decade (default = 6 → up to 1e6)
+
+    if nargin < 5 || isempty(maxPow)
+        maxPow = 6;
+    end
+
+    whichAxis = lower(whichAxis);
+    assert(whichAxis=="x" || whichAxis=="y", ...
+        'whichAxis must be ''x'' or ''y''.');
+
+    % Decade ticks: 1,10,100,...
+    decades = 10.^(0:maxPow);
+    log_dec = log10(decades);
+
+    % Keep ticks inside visible limits
+    keep = (log_dec >= axisLims(1)) & (log_dec <= axisLims(2));
+    ticks = log_dec(keep);
+    labels = string(decades(keep));
+
+    % Add "0" tick at epsilon floor if visible
+    log_eps = log10(eps_val);
+    if log_eps >= axisLims(1) && log_eps <= axisLims(2)
+        ticks  = [log_eps; ticks(:)];
+        labels = ["0"; labels(:)];
+    end
+
+    % Apply to requested axis
+    switch whichAxis
+        case "x"
+            ax.XTick = ticks;
+            ax.XTickLabel = labels;
+        case "y"
+            ax.YTick = ticks;
+            ax.YTickLabel = labels;
+    end
+end
+
+function [med, lo, hi] = bootstrap_median_ci(x, nBoot, alpha)
+    x = double(x(:)); x = x(isfinite(x));
+    if isempty(x), med=NaN; lo=NaN; hi=NaN; return; end
+    med = median(x,'omitnan');
+    n = numel(x);
+    bootM = nan(nBoot,1);
+    for b = 1:nBoot
+        idx = randi(n,n,1);
+        bootM(b) = median(x(idx));
+    end
+    lo = prctile(bootM, 100*(alpha/2));
+    hi = prctile(bootM, 100*(1-alpha/2));
+end
+
+function add_median_ci_overlay(ax, xpos, med_raw, lo_raw, hi_raw, eps_floor)
+    yMed = to_log10_per_hour(med_raw, eps_floor);
+    yLo  = to_log10_per_hour(lo_raw,  eps_floor);
+    yHi  = to_log10_per_hour(hi_raw,  eps_floor);
+
+    % simple vertical segment (no caps) + median dot
+    plot(ax, [xpos xpos], [yLo yHi], 'k-', 'LineWidth', 3);
+    plot(ax, xpos, yMed, 'ko', 'MarkerFaceColor','k', 'MarkerSize',6);
+end
+
+function [rho_hat, lo, hi] = bootstrap_spearman_ci(x, y, nBoot, alpha)
+% bootstrap_spearman_ci
+%   Bootstrap percentile CI for Spearman's rho
+%
+%   x, y   : vectors (paired)
+%   nBoot  : e.g. 5000
+%   alpha  : e.g. 0.05 for 95% CI
+
+    % keep only finite paired observations
+    x = double(x(:));
+    y = double(y(:));
+    mask = isfinite(x) & isfinite(y);
+    x = x(mask);
+    y = y(mask);
+
+    n = numel(x);
+    if n < 3
+        rho_hat = NaN; lo = NaN; hi = NaN;
+        return;
+    end
+
+    % point estimate
+    rho_hat = corr(x, y, 'Type','Spearman', 'Rows','complete');
+
+    % bootstrap
+    rho_boot = nan(nBoot,1);
+    for b = 1:nBoot
+        idx = randi(n, n, 1);      % resample PAIRS
+        rho_boot(b) = corr(x(idx), y(idx), ...
+            'Type','Spearman', 'Rows','complete');
+    end
+
+    lo = prctile(rho_boot, 100*(alpha/2));
+    hi = prctile(rho_boot, 100*(1-alpha/2));
 end
