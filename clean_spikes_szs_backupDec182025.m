@@ -1,9 +1,11 @@
 
+rng(0) % Seed RNG for bootstrapping CIs
+
 %% ======================= CONFIG =======================
 
 % Paths to data
-spikeSummaryMultiCsv = '../data/SN_counts/spike_counts_summary_multiThresh.csv';
-reportCsv            = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-12-11_1316.csv';
+spikeSummaryMultiCsv = '../data/SN_counts/spike_counts_summary_multiThresh.csv'; % spike summary
+reportCsv            = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-12-11_1316.csv'; % seizure frequency and epilepsy subtyping summary
 
 % Max number of hours to call something a routine (as opposed to
 % ambulatory)
@@ -12,13 +14,13 @@ MAX_ROUTINE_HOURS = 4;
 % Label constants
 NESD_LABEL = "Non-Epileptic Seizure Disorder";
 badTypes   = lower(["Uncertain if Epilepsy","Unknown or MRN not found",""]); % excluded from 'Epilepsy'
-canonical3 = ["General","Temporal","Frontal"];   % canonical 3 subtypes of epilepsy
+canonical3 = ["General","Temporal","Frontal"];   % 3 subtypes of epilepsy
 
-% Plotting params (shared)
-EPS_RATE = 30e-3;                 % → dotted "zero" line at y = -3 in log10(spikes/min)
+% Plotting params 
+EPS_RATE = 30e-3;                 % → dotted "zero" line 
 Y_ZERO      = log10(EPS_RATE);
 Y_LIMS      = [-2 4];             % fixed y-lims for box/swarm plots
-nBoot = 5000; alpha = 0.05;
+nBoot = 5000; alpha = 0.05; % Bootstrap paramaeter
 TITLE_Y_OFFSET = 0.02;
 
 
@@ -37,6 +39,18 @@ Table1Csv = fullfile('..','output','Table1.csv');
 resultsHtml = '../output/results_summary.html';
 
 
+%% ======================= Load spike summary csv =======================
+SpikeSummaryTable = readtable(spikeSummaryMultiCsv,'TextType','string','VariableNamingRule','preserve');
+% Get columns for spike rates
+countCol = "count_0_46"; % this is the default spike prob threshold for SN2
+durCol   = "Duration_sec";
+
+% Convert spike count to spike rate in spikes/hour
+SpikeSummaryTable.SpikeRate_perHour = nan(height(SpikeSummaryTable),1);
+SpikeSummaryTable.SpikeRate_perHour = SpikeSummaryTable.(countCol)./SpikeSummaryTable.(durCol) * 3600;
+
+
+
 %% ======================= LOAD REDCAP REPORT  =======================
 % ---------- Load raw report (for outpatient rule + everything else) ----------
 ReportTable = readtable(reportCsv,'TextType','string','VariableNamingRule','preserve');
@@ -50,7 +64,7 @@ allowable_visits = ["CONSULT VISIT","ESTABLISHED PATIENT VISIT",...
     "NPV NEUROLOGY",...
     "RETURN ANNUAL VISIT","RETURN PATIENT EXTENDED",...
     "RETURN PATIENT VISIT","RPV MANAGEMENT DURING COVID-19","TELEHEALTH VIDEO VISIT RETURN",...
-    ];
+    ]; % these are things I deemed to be consistent with outpatient visits; other things were telephone calls, care management encounters, etc.
 
 %% ======================= VISIT-TYPE FILTER =======================
 % Drop any clinic visits whose visit_type is NOT in allowable_visits.
@@ -79,7 +93,6 @@ for i = 1:height(ReportTable)
 
     % If no usable visit_type content → wipe all visit arrays
     if strlength(vt_raw)==0 || vt_raw=="[]" || vt_raw=="<missing>"
-        % Normalize to empty arrays
         ReportTable.visit_type(i)        = "[]";
         ReportTable.visit_dates_deid(i)  = "[]";
         ReportTable.sz_freqs(i)          = "[]";
@@ -150,7 +163,7 @@ for i = 1:height(ReportTable)
         hs_cell = [];
     end
 
-    % ---------- 3) Align lengths (take the minimum across arrays) ----------
+    % ---------- 3) Align lengths ----------
     len_vt    = numel(vt);
     len_dates = numel(dates_cell);
     len_sz    = numel(sz_cell);
@@ -192,7 +205,8 @@ for i = 1:height(ReportTable)
         continue
     end
 
-    % only keep those where keepMask == 1
+    % only keep those where keepMask == 1 (remove seizure frequency
+    % information from non-allowable visits)
     vt_filt    = cellstr(vt_use(keepMask));   % back to cellstr for jsonencode
     dates_filt = dates_use(keepMask);
     sz_filt    = sz_use(keepMask);
@@ -210,23 +224,13 @@ end
 
 fprintf('[Visit-type filter] Total clinic visits before filter: %d\n', totalVisits_before);
 fprintf('[Visit-type filter] Total clinic visits after filter:  %d (kept %.1f%%)\n', ...
-    totalVisits_after, 100*totalVisits_after/max(1,totalVisits_before));
-
-%% ======================= Load spike summary csv =======================
-SpikeSummaryTable = readtable(spikeSummaryMultiCsv,'TextType','string','VariableNamingRule','preserve');
-% Get columns for spike rates
-countCol = "count_0_46"; % this is the default spike prob threshold for SN2
-durCol   = "Duration_sec";
-
-% Convert spike count to spike rate in spikes/hour
-SpikeSummaryTable.SpikeRate_perHour = nan(height(SpikeSummaryTable),1);
-SpikeSummaryTable.SpikeRate_perHour = SpikeSummaryTable.(countCol)./SpikeSummaryTable.(durCol) * 3600;
-
+    totalVisits_after, 100*totalVisits_after/max(1,totalVisits_before)); % expect to have kept 92% of visits with this filter
 
 %% ======================= OUTPATIENT FILTER =======================
-fprintf('\n=== BUILDING OUTPATIENT KEYS (site rule OR report_patient_class OR jay_in_or_out) ===\n');
-
-% ---------- 1) Outpatient by acquired_on (Spe/Radnor) ----------
+% Only allow EEGs that appear to be done in the outpatient setting
+nredcap_rows_orig = size(ReportTable,1);
+nspike_rows_orig = size(SpikeSummaryTable,1);
+% ---------- Rule 1) Outpatient if acquired_on is Spe or Radnor ----------
 OutptBySite = table('Size',[0 2], ...
                      'VariableTypes',{'double','double'}, ...
                      'VariableNames',{'Patient','Session'});
@@ -241,8 +245,7 @@ end
 fprintf('[Outpatient rule] Site-based (Spe/Radnor) outpatients: %d sessions.\n', ...
     height(OutptBySite));
 
-
-% ---------- 2) Outpatient by report_patient_class == "Outpatient" ----------
+% ---------- Rule 2) Outpatient if report_patient_class == "Outpatient" (Epic EEG report says outpatient) ----------
 OutptByClass = table('Size',[0 2], ...
                      'VariableTypes',{'double','double'}, ...
                      'VariableNames',{'Patient','Session'});
@@ -257,7 +260,7 @@ end
 fprintf('[Outpatient rule] report_PATIENT_CLASS=="Outpatient": %d sessions.\n', ...
     height(OutptByClass));
 
-% ---------- 3) Outpatient by jay_in_or_out == "out" ----------
+% ---------- Rule 3) Outpatient if jay_in_or_out == "out" (Jay database report says outpatient) ----------
 OutptByJay = table('Size',[0 2], ...
                    'VariableTypes',{'double','double'}, ...
                    'VariableNames',{'Patient','Session'});
@@ -303,8 +306,44 @@ fprintf(['\n[Outpatient filter] Kept ONLY outpatient routine EEGs (Duration_sec 
          '    - acquired_on containing "Spe" or "Radnor" (case-insensitive) OR\n' ...
          '    - report_PATIENT_CLASS == "Outpatient" OR\n' ...
          '    - jay_in_or_out == "out"\n']);
-fprintf('[Outpatient+routine filter] Kept %d spike rows and %d report rows.\n', ...
-    height(SpikeSummaryTable), height(ReportTable));
+fprintf('[Outpatient+routine filter] Kept %d (%1.1f%%) spike rows and %d (%1.1f%%) report rows.\n', ...
+    height(SpikeSummaryTable), height(SpikeSummaryTable)/nspike_rows_orig*100,...
+    height(ReportTable),height(ReportTable)/nredcap_rows_orig*100);
+
+%% Check that patient-session pairs exactly match in report table and spike summary table
+% --- pick the right variable names in each table ---
+pidS = "Patient";   sesS = "Session";   % SpikeSummaryTable columns
+pidR = "patient_id";   sesR = "session_number";   % ReportTable columns
+
+% --- build comparable keys (string-safe, whitespace-safe) ---
+keySpike  = upper(strtrim(string(SpikeSummaryTable.(pidS)))) + "|" + upper(strtrim(string(SpikeSummaryTable.(sesS))));
+keyReport = upper(strtrim(string(ReportTable.(pidR))))      + "|" + upper(strtrim(string(ReportTable.(sesR))));
+
+uSpike  = unique(keySpike);
+uReport = unique(keyReport);
+
+onlyInSpike  = setdiff(uSpike,  uReport);
+onlyInReport = setdiff(uReport, uSpike);
+
+fprintf("Unique combos in SpikeSummary: %d\n", numel(uSpike));
+fprintf("Unique combos in ReportTable:  %d\n", numel(uReport));
+
+assert(isempty(onlyInReport))
+assert(isempty(onlyInSpike))
+
+% Count rows per key in each table
+[gs, ks] = findgroups(SpikeSummaryTable.Patient, SpikeSummaryTable.Session);
+cs = splitapply(@numel, SpikeSummaryTable.Patient, gs);
+
+[gr, kr] = findgroups(ReportTable.patient_id, ReportTable.session_number);
+cr = splitapply(@numel, ReportTable.patient_id, gr);
+
+fprintf('SpikeSummaryTable: %d keys, %d total rows, %d keys duplicated\n', ...
+    height(ks), height(SpikeSummaryTable), nnz(cs>1));
+fprintf('ReportTable:       %d keys, %d total rows, %d keys duplicated\n', ...
+    height(kr), height(ReportTable), nnz(cr>1));
+
+assert(nnz(cs>1)==0);assert(nnz(cr>1)==0)
 
 
 %% ======================= BUILD PATIENT-LEVEL METRICS ONCE =======================
@@ -884,11 +923,12 @@ boxchart(axS2, categorical(G_S2), Y_S2, 'BoxFaceAlpha',0.25,'MarkerStyle','none'
 swarmchart(axS2, categorical(G_S2), Y_S2, 18, 'filled','MarkerFaceAlpha',0.18);
 
 % Plot 95% CI (bootsrapped) for medians)
-[med_s2_pre, lo_s2_pre, hi_s2_pre] = bootstrap_median_ci(freq_anyPresent, nBoot, alpha);  
-add_median_ci_overlay(axS2, 1, med_s2_pre, lo_s2_pre, hi_s2_pre, EPS_RATE);    
+[med_abs, lo_abs, hi_abs] = bootstrap_median_ci(freq_allAbsent, nBoot, alpha);
+add_median_ci_overlay_month(axS2, 1, med_abs, lo_abs, hi_abs, EPS_FREQ);
 
-[med_s2_abs, lo_s2_abs, hi_s2_abs] = bootstrap_median_ci(freq_allAbsent, nBoot, alpha);
-add_median_ci_overlay(axS2, 2, med_s2_abs, lo_s2_abs, hi_s2_abs, EPS_RATE);
+[med_pre, lo_pre, hi_pre] = bootstrap_median_ci(freq_anyPresent, nBoot, alpha);
+add_median_ci_overlay_month(axS2, 2, med_pre, lo_pre, hi_pre, EPS_FREQ);
+
 
 yline(axS2, Y_S2_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
 ylim(axS2, Y_S2_LIMS);
@@ -1327,273 +1367,97 @@ writetable(Table1_flat,Table1Csv);
 
 %% ======================= PAIRED ANALYSIS =======================
 
+
 %% -------- PARAMETERS FOR VISIT–EEG MATCHING --------
 maxDaysBefore = 30;    % visit cannot be more than 30 days BEFORE EEG
 maxDaysAfter  = 30;    % visit cannot be more than 30 days AFTER EEG
 min_abs_diff_spikes = 0; % 0 means that high spike eeg must have more spikes than low spike eeg
 
-%% -------- 1) Build visit-level frequency table (Rule 1 only) --------
-% Helper function should return:
-%   Vuniq_R1: Patient (double), VisitDate (datetime), Freq_R1 (double)
-Vuniq_R1 = build_visit_level_freq_R1(ReportTable);
+gapVec = [15 30 60];
+nG = numel(gapVec);
 
-% Restrict to epilepsy patients based on Views
-EpPatients = Views.PatientLevelSpikeRates.Patient(Views.IsEpilepsyMask);
-EpPatients = unique(EpPatients);
-EpTable    = table(EpPatients, 'VariableNames', {'Patient'});
+effectMat = nan(nG, nG);
+pMat      = nan(nG, nG);
+nMat      = nan(nG, nG);
 
-Vuniq_R1 = innerjoin(Vuniq_R1, EpTable, 'Keys', 'Patient');
+%% ===== Build inputs for run_paired_analysis =====
 
-fprintf('[Spike-first (closest-visit) analysis] Visit-level Rule 1 table: %d rows for epilepsy patients.\n', ...
-    height(Vuniq_R1));
+% 1) Visit-level table (Rule 1)
+Vuniq_R1 = build_visit_level_freq_R1(ReportTable);   % Patient, VisitDate, Freq_R1
 
-%% -------- 2) Build session-level spike rates + EEG dates --------
-% Session-level spike rates (outpatient + routine only) from Views:
-SessRates = Views.SessionLevelSpikeRates;   % Patient, Session, SpikesPerHour, SpikesPerMin
+% 2) Epilepsy patient list (from Views)
+EpPatients = unique(Views.PatientLevelSpikeRates.Patient(Views.IsEpilepsyMask));
 
-% EEG start times live in the report table for the kept sessions:
-Rk      = Views.ReportForKeptSessions;      % has Patient, Session, start_time_deid, etc.
+% 3) Session-level spikes + EEG date per session
+SessRates = Views.SessionLevelSpikeRates;            % Patient, Session, SpikesPerHour
+
+Rk = Views.ReportForKeptSessions;                    % has Patient, Session, start_time_deid, etc.
 EEG_raw = Rk.start_time_deid;
+
 if isdatetime(EEG_raw)
     EEG_dt = EEG_raw;
 else
     EEG_dt = datetime(strtrim(string(EEG_raw)), ...
-                      'InputFormat','yyyy-MM-dd''T''HH:mm:ss');
+        'InputFormat',"yyyy-MM-dd'T'HH:mm:ss");
 end
 
 SessionDates = table(Rk.Patient, Rk.Session, EEG_dt, ...
     'VariableNames', {'Patient','Session','EEG_Date'});
 
-% Join spike rates + EEG dates (still outpatient + routine)
 SessWithDate = innerjoin(SessRates, SessionDates, 'Keys', {'Patient','Session'});
 
-% Restrict to epilepsy patients only
-SessWithDate = innerjoin(SessWithDate, EpTable, 'Keys', 'Patient');
 
-fprintf('[Spike-first (closest-visit) analysis] Session-level EEG table: %d epilepsy sessions.\n', ...
-    height(SessWithDate));
 
-%% -------- 3) Build all EEG–visit matches within the allowed window --------
-Pairs = table('Size',[0 7], ...
-    'VariableTypes', {'double','double','datetime','datetime','double','double','double'}, ...
-    'VariableNames', {'Patient','Session','EEG_Date','VisitDate','GapDays', ...
-                      'SpikeRate_perHour','Freq_R1'});
+%% Run paired analysis across grid
+for i = 1:nG
+    for j = 1:nG
+        maxBefore = gapVec(i);
+        maxAfter  = gapVec(j);
 
-for pid = EpPatients'
-    % All outpatient routine EEG sessions for this patient
-    s_mask = (SessWithDate.Patient == pid);
-    if ~any(s_mask), continue; end
-    S_sub = SessWithDate(s_mask, :);
+        try
+            [r_eff, p_val, nPairs, ~, ~, ~, ~] = run_paired_analysis( ...
+                SessWithDate, Vuniq_R1, EpPatients, ...
+                maxBefore, maxAfter, min_abs_diff_spikes);
 
-    % All allowable clinic visits for this patient (already filtered upstream)
-    v_mask = (Vuniq_R1.Patient == pid);
-    if ~any(v_mask), continue; end
-    V_sub = Vuniq_R1(v_mask, :);
 
-    for j = 1:height(S_sub)
-        EEGd = S_sub.EEG_Date(j);
+            effectMat(i,j) = r_eff;
+            pMat(i,j)      = p_val;
+            nMat(i,j)      = nPairs;
 
-        % Positive gapDays = EEG after visit; negative = EEG before visit
-        gapDays = days(EEGd - V_sub.VisitDate);
-        keep    = (gapDays >= -maxDaysBefore) & (gapDays <= maxDaysAfter);
-
-        if ~any(keep), continue; end
-
-        tmp = table( ...
-            repmat(pid, nnz(keep), 1), ...
-            repmat(S_sub.Session(j), nnz(keep), 1), ...
-            repmat(EEGd, nnz(keep), 1), ...
-            V_sub.VisitDate(keep), ...
-            gapDays(keep), ...
-            repmat(S_sub.SpikesPerHour(j), nnz(keep), 1), ...
-            V_sub.Freq_R1(keep), ...
-            'VariableNames', Pairs.Properties.VariableNames);
-
-        Pairs = [Pairs; tmp]; %#ok<AGROW>
+        catch ME
+            warning('Failed for window [%d, %d]: %s', ...
+                maxBefore, maxAfter, ME.message);
+        end
     end
 end
 
-fprintf('\n[Spike-first (closest-visit) analysis] Built %d EEG–visit matches across %d epilepsy patients.\n', ...
-    height(Pairs), numel(unique(Pairs.Patient)));
+%% FDR correction
+pVec = pMat(:);
+valid = isfinite(pVec);
 
-% Drop rows with non-finite frequencies or spike rates
-Pairs = Pairs(isfinite(Pairs.Freq_R1) & isfinite(Pairs.SpikeRate_perHour), :);
+qVec = nan(size(pVec));
+qVec(valid) = mafdr(pVec(valid), 'BHFDR', true);
 
-if isempty(Pairs)
-    warning('No finite EEG–visit matches for spike-first (closest-visit) analysis.');
-end
+qMat = reshape(qVec, size(pMat));
+sigMat = qMat < 0.05;
 
-%% -------- 4) For each (Patient, Session), keep ONLY the closest visit WITH finite seizure freq --------
-[grpPS, ~, ~] = findgroups(Pairs.Patient, Pairs.Session);
+%% Primary plot
+maxBefore_primary = 30;
+maxAfter_primary  = 30;
 
-keepPerEEG = false(height(Pairs),1);
+[r_eff_primary, p_signed, nPairs, stats_signed, PairedEEGTable, Freq_low, Freq_high] = run_paired_analysis( ...
+    SessWithDate, Vuniq_R1, EpPatients, ...
+    maxBefore_primary, maxAfter_primary, min_abs_diff_spikes);
 
-for g = 1:max(grpPS)
-    idx = find(grpPS == g);   % rows for one (Patient, Session)
+low_freq_log  = to_log10_per_month(Freq_low,  EPS_FREQ);
+high_freq_log = to_log10_per_month(Freq_high, EPS_FREQ);
 
-    % Only consider visits with non-NaN seizure frequency
-    idx_ok = idx(isfinite(Pairs.Freq_R1(idx)));
-
-    if isempty(idx_ok)
-        % No usable visit frequencies for this EEG → keep none (EEG will be dropped)
-        continue;
-    end
-
-    if numel(idx_ok) == 1
-        keepPerEEG(idx_ok) = true;
-        continue;
-    end
-
-    % Choose closest among the usable visits
-    [~, bestLocal] = min(abs(Pairs.GapDays(idx_ok)));
-    keepPerEEG(idx_ok(bestLocal)) = true;
-end
-
-Pairs = Pairs(keepPerEEG, :);
-
-fprintf('[Spike-first (closest finite-visit) analysis] After closest-visit filter: %d EEG–visit pairs remain.\n', ...
-    height(Pairs));
-SessAgg = Pairs;
-
-
-%% -------- 5) For each patient, pick LOWEST- and HIGHEST-spike EEG --------
-[grpP, uPatients] = findgroups(SessAgg.Patient);
-
-nP           = numel(uPatients);
-Spike_low    = nan(nP,1);
-Spike_high   = nan(nP,1);
-Freq_low     = nan(nP,1);
-Freq_high    = nan(nP,1);
-EEGDate_low  = NaT(nP,1);
-EEGDate_high = NaT(nP,1);
-Visit_low    = NaT(nP,1);
-Visit_high   = NaT(nP,1);
-Sess_low_id  = nan(nP,1);
-Sess_high_id = nan(nP,1);
-
-for k = 1:nP
-    idx = find(grpP == k);
-    if numel(idx) < 2
-        % Need at least 2 EEG sessions with matched visits for this patient
-        continue;
-    end
-
-    r = SessAgg.SpikeRate_perHour(idx);   % spike rate per EEG
-    f = SessAgg.Freq_R1(idx);         % seizure freq per EEG (from its single visit)
-
-    % Require at least two sessions with finite seizure frequency & spike rate
-    finiteMask = isfinite(r) & isfinite(f);
-    if nnz(finiteMask) < 2
-        continue;
-    end
-
-    idx_use = idx(finiteMask);
-    r_use   = r(finiteMask);
-    f_use   = f(finiteMask);
-
-    % Identify lowest-spike and highest-spike EEG within this patient
-    [~, iLowLocal]  = min(r_use);
-    [~, iHighLocal] = max(r_use);
-
-    if iLowLocal == iHighLocal
-        % All spike rates identical for this patient's usable sessions
-        continue;
-    end
-
-    if r_use(iHighLocal) - r_use(iLowLocal) <= min_abs_diff_spikes
-        % Spike rate between high and low spike freq EEG too similar
-        continue;
-    end
-
-    idx_low  = idx_use(iLowLocal);
-    idx_high = idx_use(iHighLocal);
-
-    % ---- NEW: Exclude patients where the SAME visit is paired to both EEGs ----
-    if SessAgg.VisitDate(idx_low) == SessAgg.VisitDate(idx_high)
-        % This visit would contribute to both low- and high-spike EEG → skip patient
-        continue;
-    end
-
-    % Store values
-    Spike_low(k)    = SessAgg.SpikeRate_perHour(idx_low);
-    Spike_high(k)   = SessAgg.SpikeRate_perHour(idx_high);
-    Freq_low(k)     = SessAgg.Freq_R1(idx_low);
-    Freq_high(k)    = SessAgg.Freq_R1(idx_high);
-    EEGDate_low(k)  = SessAgg.EEG_Date(idx_low);
-    EEGDate_high(k) = SessAgg.EEG_Date(idx_high);
-    Visit_low(k)    = SessAgg.VisitDate(idx_low);
-    Visit_high(k)   = SessAgg.VisitDate(idx_high);
-    Sess_low_id(k)  = SessAgg.Session(idx_low);
-    Sess_high_id(k) = SessAgg.Session(idx_high);
-end
-
-%% -------- 6) Keep only valid pairs and run paired Wilcoxon --------
-valid = isfinite(Spike_low) & isfinite(Spike_high) & ...
-        isfinite(Freq_low)  & isfinite(Freq_high);
-
-Spike_low    = Spike_low(valid);
-Spike_high   = Spike_high(valid);
-Freq_low     = Freq_low(valid);
-Freq_high    = Freq_high(valid);
-EEGDate_low  = EEGDate_low(valid);
-EEGDate_high = EEGDate_high(valid);
-Visit_low    = Visit_low(valid);
-Visit_high   = Visit_high(valid);
-Sess_low_id  = Sess_low_id(valid);
-Sess_high_id = Sess_high_id(valid);
-uPatients    = uPatients(valid);
-
-nPairs = numel(Freq_low);
-fprintf('[Spike-first (closest-visit) analysis] %d patients have valid low/high-spike EEG pairs with distinct visits.\n', ...
-    nPairs);
-
-% Build a table so you can inspect per-patient data used in the analysis
-PairedEEGTable = table(uPatients, Sess_low_id, Sess_high_id, ...
-    EEGDate_low, EEGDate_high, Visit_low, Visit_high, ...
-    Spike_low, Spike_high, Freq_low, Freq_high, ...
-    'VariableNames', {'Patient','Session_low','Session_high', ...
-                      'EEGDate_low','EEGDate_high', ...
-                      'VisitDate_low','VisitDate_high', ...
-                      'SpikeRate_low_perHour','SpikeRate_high_perHour', ...
-                      'Freq_low_perMonth','Freq_high_perMonth'});
-
-fprintf('[Spike-first (closest-visit) analysis] Created PairedEEGTable with %d rows.\n', ...
-    height(PairedEEGTable));
-
-
-% Paired Wilcoxon (signed-rank) on seizure frequency
-[p_signed, ~, stats_signed] = signrank(Freq_high, Freq_low, 'method','approx');
-medDiffFreq = median(Freq_high - Freq_low, 'omitnan');
-
-fprintf('\n=== Spike-first (closest-visit) analysis: seizure frequency at HIGH- vs LOW-spike EEGs ===\n');
-fprintf('Number of patients with valid pairs: %d\n', nPairs);
-fprintf('Median seizure freq at LOW-spike EEG:  %.3f seizures/month\n', ...
-    median(Freq_low,'omitnan'));
-fprintf('Median seizure freq at HIGH-spike EEG: %.3f seizures/month\n', ...
-    median(Freq_high,'omitnan'));
-fprintf('Median paired difference (HIGH - LOW):  %.3f seizures/month\n', medDiffFreq);
-
-if isfield(stats_signed,'zval') && ~isempty(stats_signed.zval)
-    z        = stats_signed.zval;
-    r_effect = z / sqrt(nPairs);  % simple effect size
-    fprintf('Wilcoxon signed-rank p = %.3g, z = %.3f, r ≈ %.3f\n', ...
-        p_signed, z, r_effect);
-else
-    fprintf('Wilcoxon signed-rank p = %.3g\n', p_signed);
-end
-
-% Checking correlation
-if 0
-    delta_spikes = Spike_high-Spike_low;
-    delta_freq = Freq_high-Freq_low;
-    figure
-    plot(delta_spikes,delta_freq,'o');
-    [r,p]=corr(delta_spikes,delta_freq,"Type","Spearman");
-end
 
 %% -------- 8) Paired plot of seizure frequency --------
-figP = figure('Color','w','Position',[100 100 650 500]);
-axP  = axes(figP); hold(axP,'on'); box(axP,'off'); grid(axP,'on');
+figPS = figure('Color','w','Position',[80 80 1400 550]);
+tl = tiledlayout(figPS,1,2,'TileSpacing','compact','Padding','compact');
+axP = nexttile(tl,1);
+hold(axP,'on'); box(axP,'off'); grid(axP,'on');
 
 low_freq_log = to_log10_per_month(Freq_low,  EPS_FREQ);
 high_freq_log = to_log10_per_month(Freq_high,  EPS_FREQ);
@@ -1631,14 +1495,70 @@ ySig = yMax - 0.2*(yMax);
 if p_signed < 0.001
     pLabel = 'p < 0.001';
 else
-    pLabel = sprintf('p = %.2g', p_signed);
+    pLabel = sprintf('p = %.2g, r = %1.2f', p_signed,r_eff_primary);
 end
 add_sigbar(axP, 1, 2, ySig, pLabel);
 title(axP, sprintf('Paired seizure frequencies (N = %d patients)', nPairs), ...
     'FontSize', 20);
 
 set(axP,'FontSize',20);
-exportgraphics(figP, figS3_out, 'Resolution', 300);
+
+axH = nexttile(tl,2);
+
+imagesc(axH, effectMat);
+axis(axH,'equal'); axis(axH,'tight');
+colormap(axH, redbluecmap);          % or parula
+caxis(axH, [-0.5 0.5]);              % adjust as you like
+cb = colorbar(axH);
+ylabel(cb, 'Paired effect size (Wilcoxon r)', ...
+    'FontSize', 20);
+
+xlabel(axH,'Max days after EEG','fontsize',20);
+ylabel(axH,'Max days BEFORE EEG','fontsize',20);
+
+axH.XTick = 1:nG;
+axH.YTick = 1:nG;
+axH.XTickLabel = gapVec;
+axH.YTickLabel = gapVec;
+
+title(axH, 'Sensitivity to visit–EEG matching window','fontsize', 20);
+for ii = 1:nG
+    for jj = 1:nG
+        r = effectMat(ii,jj);
+        q = qMat(ii,jj);
+        N = nMat(ii,jj);
+
+        if ~isfinite(r) || ~isfinite(q) || N == 0
+            continue
+        end
+
+        % Significance stars (optional but helpful)
+        if q < 0.001
+            sig = "***";
+        elseif q < 0.01
+            sig = "**";
+        elseif q < 0.05
+            sig = "*";
+        else
+            sig = "";
+        end
+
+        % Compact 2-line label
+        lab = sprintf('N=%d\nr=%.2f', N, r);
+
+        text(axH, jj, ii, lab, ...
+            'HorizontalAlignment','center', ...
+            'VerticalAlignment','middle', ...
+            'FontSize', 14, ...          % reduce if crowded
+            'Color','k', ...
+            'FontWeight','bold');
+    end
+end
+set(gca,'fontsize',20)
+
+exportgraphics(figPS, figS3_out, 'Resolution',300);
+fprintf('Saved paired + sensitivity figure: %s\n', figS3_out);
+
 
 
 delta_spikes = PairedEEGTable.SpikeRate_high_perHour-PairedEEGTable.SpikeRate_low_perHour;
@@ -1735,8 +1655,7 @@ fprintf(fid,[' Subtype-specific correlations were significant for generalized ep
     SpearmanResults_main.N(3),SpearmanResults_main.Spearman_r(3),...
      subtype_ci_main.ci_lo(3),subtype_ci_main.ci_hi(3),format_p_html(SpearmanResults_main.p_bonf(3)));
 
-fprintf(fid,['Results were consistent when restricting analyses to '...
-    'patients with non-zero spike rates and seizure frequencies (Fig. S1). ']);
+fprintf(fid,['Results were consistent when restricting analyses to non-zero data (Fig. S1). ']);
 
 fprintf(fid,['Patients who ever had spikes reported on at least one EEG also had '...
     'higher mean seizure frequencies than patients whose EEGs consistently '...
@@ -2681,4 +2600,231 @@ function [rho_hat, lo, hi] = bootstrap_spearman_ci(x, y, nBoot, alpha)
 
     lo = prctile(rho_boot, 100*(alpha/2));
     hi = prctile(rho_boot, 100*(1-alpha/2));
+end
+
+function [r_effect, p_signed, nPairs, stats_signed, PairedEEGTable, Freq_low, Freq_high] = ...
+    run_paired_analysis(SessWithDate, Vuniq_R1, EpPatients, maxDaysBefore, maxDaysAfter, min_abs_diff_spikes)
+
+EpPatients = unique(EpPatients(:));
+EpTable    = table(EpPatients, 'VariableNames', {'Patient'});
+
+% Ensure inputs are already restricted to epilepsy patients
+SessWithDate = innerjoin(SessWithDate, EpTable, 'Keys','Patient');
+Vuniq_R1     = innerjoin(Vuniq_R1,     EpTable, 'Keys','Patient');
+
+
+%% -------- 3) Build all EEG–visit matches within the allowed window --------
+Pairs = table('Size',[0 7], ...
+    'VariableTypes', {'double','double','datetime','datetime','double','double','double'}, ...
+    'VariableNames', {'Patient','Session','EEG_Date','VisitDate','GapDays', ...
+                      'SpikeRate_perHour','Freq_R1'});
+
+for pid = EpPatients'
+    % All outpatient routine EEG sessions for this patient
+    s_mask = (SessWithDate.Patient == pid);
+    if ~any(s_mask), continue; end
+    S_sub = SessWithDate(s_mask, :);
+
+    % All allowable clinic visits for this patient (already filtered upstream)
+    v_mask = (Vuniq_R1.Patient == pid);
+    if ~any(v_mask), continue; end
+    V_sub = Vuniq_R1(v_mask, :);
+
+    for j = 1:height(S_sub)
+        EEGd = S_sub.EEG_Date(j);
+
+        % Positive gapDays = EEG after visit; negative = EEG before visit
+        gapDays = days(EEGd - V_sub.VisitDate);
+        keep    = (gapDays >= -maxDaysBefore) & (gapDays <= maxDaysAfter);
+
+        if ~any(keep), continue; end
+
+        tmp = table( ...
+            repmat(pid, nnz(keep), 1), ...
+            repmat(S_sub.Session(j), nnz(keep), 1), ...
+            repmat(EEGd, nnz(keep), 1), ...
+            V_sub.VisitDate(keep), ...
+            gapDays(keep), ...
+            repmat(S_sub.SpikesPerHour(j), nnz(keep), 1), ...
+            V_sub.Freq_R1(keep), ...
+            'VariableNames', Pairs.Properties.VariableNames);
+
+        Pairs = [Pairs; tmp]; %#ok<AGROW>
+    end
+end
+
+fprintf('\n[Spike-first (closest-visit) analysis] Built %d EEG–visit matches across %d epilepsy patients.\n', ...
+    height(Pairs), numel(unique(Pairs.Patient)));
+
+% Drop rows with non-finite frequencies or spike rates
+Pairs = Pairs(isfinite(Pairs.Freq_R1) & isfinite(Pairs.SpikeRate_perHour), :);
+
+if isempty(Pairs)
+    warning('No finite EEG–visit matches for spike-first (closest-visit) analysis.');
+end
+
+%% -------- 4) For each (Patient, Session), keep ONLY the closest visit WITH finite seizure freq --------
+[grpPS, ~, ~] = findgroups(Pairs.Patient, Pairs.Session);
+
+keepPerEEG = false(height(Pairs),1);
+
+for g = 1:max(grpPS)
+    idx = find(grpPS == g);   % rows for one (Patient, Session)
+
+    % Only consider visits with non-NaN seizure frequency
+    idx_ok = idx(isfinite(Pairs.Freq_R1(idx)));
+
+    if isempty(idx_ok)
+        % No usable visit frequencies for this EEG → keep none (EEG will be dropped)
+        continue;
+    end
+
+    if numel(idx_ok) == 1
+        keepPerEEG(idx_ok) = true;
+        continue;
+    end
+
+    % Choose closest among the usable visits
+    [~, bestLocal] = min(abs(Pairs.GapDays(idx_ok)));
+    keepPerEEG(idx_ok(bestLocal)) = true;
+end
+
+Pairs = Pairs(keepPerEEG, :);
+
+fprintf('[Spike-first (closest finite-visit) analysis] After closest-visit filter: %d EEG–visit pairs remain.\n', ...
+    height(Pairs));
+SessAgg = Pairs;
+
+
+%% -------- 5) For each patient, pick LOWEST- and HIGHEST-spike EEG --------
+[grpP, uPatients] = findgroups(SessAgg.Patient);
+
+nP           = numel(uPatients);
+Spike_low    = nan(nP,1);
+Spike_high   = nan(nP,1);
+Freq_low     = nan(nP,1);
+Freq_high    = nan(nP,1);
+EEGDate_low  = NaT(nP,1);
+EEGDate_high = NaT(nP,1);
+Visit_low    = NaT(nP,1);
+Visit_high   = NaT(nP,1);
+Sess_low_id  = nan(nP,1);
+Sess_high_id = nan(nP,1);
+
+for k = 1:nP
+    idx = find(grpP == k);
+    if numel(idx) < 2
+        % Need at least 2 EEG sessions with matched visits for this patient
+        continue;
+    end
+
+    r = SessAgg.SpikeRate_perHour(idx);   % spike rate per EEG
+    f = SessAgg.Freq_R1(idx);         % seizure freq per EEG (from its single visit)
+
+    % Require at least two sessions with finite seizure frequency & spike rate
+    finiteMask = isfinite(r) & isfinite(f);
+    if nnz(finiteMask) < 2
+        continue;
+    end
+
+    idx_use = idx(finiteMask);
+    r_use   = r(finiteMask);
+    f_use   = f(finiteMask);
+
+    % Identify lowest-spike and highest-spike EEG within this patient
+    [~, iLowLocal]  = min(r_use);
+    [~, iHighLocal] = max(r_use);
+
+    if iLowLocal == iHighLocal
+        % All spike rates identical for this patient's usable sessions
+        continue;
+    end
+
+    if r_use(iHighLocal) - r_use(iLowLocal) <= min_abs_diff_spikes
+        % Spike rate between high and low spike freq EEG too similar
+        continue;
+    end
+
+    idx_low  = idx_use(iLowLocal);
+    idx_high = idx_use(iHighLocal);
+
+    % ---- NEW: Exclude patients where the SAME visit is paired to both EEGs ----
+    if SessAgg.VisitDate(idx_low) == SessAgg.VisitDate(idx_high)
+        % This visit would contribute to both low- and high-spike EEG → skip patient
+        continue;
+    end
+
+    % Store values
+    Spike_low(k)    = SessAgg.SpikeRate_perHour(idx_low);
+    Spike_high(k)   = SessAgg.SpikeRate_perHour(idx_high);
+    Freq_low(k)     = SessAgg.Freq_R1(idx_low);
+    Freq_high(k)    = SessAgg.Freq_R1(idx_high);
+    EEGDate_low(k)  = SessAgg.EEG_Date(idx_low);
+    EEGDate_high(k) = SessAgg.EEG_Date(idx_high);
+    Visit_low(k)    = SessAgg.VisitDate(idx_low);
+    Visit_high(k)   = SessAgg.VisitDate(idx_high);
+    Sess_low_id(k)  = SessAgg.Session(idx_low);
+    Sess_high_id(k) = SessAgg.Session(idx_high);
+end
+
+%% -------- 6) Keep only valid pairs and run paired Wilcoxon --------
+valid = isfinite(Spike_low) & isfinite(Spike_high) & ...
+        isfinite(Freq_low)  & isfinite(Freq_high);
+
+Spike_low    = Spike_low(valid);
+Spike_high   = Spike_high(valid);
+Freq_low     = Freq_low(valid);
+Freq_high    = Freq_high(valid);
+EEGDate_low  = EEGDate_low(valid);
+EEGDate_high = EEGDate_high(valid);
+Visit_low    = Visit_low(valid);
+Visit_high   = Visit_high(valid);
+Sess_low_id  = Sess_low_id(valid);
+Sess_high_id = Sess_high_id(valid);
+uPatients    = uPatients(valid);
+
+nPairs = numel(Freq_low);
+fprintf('[Spike-first (closest-visit) analysis] %d patients have valid low/high-spike EEG pairs with distinct visits.\n', ...
+    nPairs);
+
+% Build a table so you can inspect per-patient data used in the analysis
+PairedEEGTable = table(uPatients, Sess_low_id, Sess_high_id, ...
+    EEGDate_low, EEGDate_high, Visit_low, Visit_high, ...
+    Spike_low, Spike_high, Freq_low, Freq_high, ...
+    'VariableNames', {'Patient','Session_low','Session_high', ...
+                      'EEGDate_low','EEGDate_high', ...
+                      'VisitDate_low','VisitDate_high', ...
+                      'SpikeRate_low_perHour','SpikeRate_high_perHour', ...
+                      'Freq_low_perMonth','Freq_high_perMonth'});
+
+fprintf('[Spike-first (closest-visit) analysis] Created PairedEEGTable with %d rows.\n', ...
+    height(PairedEEGTable));
+
+
+% Paired Wilcoxon (signed-rank) on seizure frequency
+[p_signed, ~, stats_signed] = signrank(Freq_high, Freq_low, 'method','approx');
+%medDiffFreq = median(Freq_high - Freq_low, 'omitnan');
+
+z        = stats_signed.zval;
+r_effect = z / sqrt(nPairs);  % simple effect size
+
+% Checking correlation
+if 0
+    delta_spikes = Spike_high-Spike_low;
+    delta_freq = Freq_high-Freq_low;
+    figure
+    plot(delta_spikes,delta_freq,'o');
+    [r,p]=corr(delta_spikes,delta_freq,"Type","Spearman");
+end
+
+
+end
+
+function add_median_ci_overlay_month(ax, xpos, med_raw, lo_raw, hi_raw, eps_floor)
+    yMed = to_log10_per_month(med_raw, eps_floor);
+    yLo  = to_log10_per_month(lo_raw,  eps_floor);
+    yHi  = to_log10_per_month(hi_raw,  eps_floor);
+
+    plot(ax, [xpos xpos], [yLo yHi], 'k-', 'LineWidth', 3);
+    plot(ax, xpos, yMed, 'ko', 'MarkerFaceColor','k', 'MarkerSize',6);
 end
