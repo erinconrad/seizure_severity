@@ -16,8 +16,7 @@ Requirements:
      and so the same patient may appear in multiple rows.
 2. Matlab (R2024a) and the Statistics and Machine Learning Toolbox
 3. This codebase, located at: https://github.com/erinconrad/seizure_severity
-4. Create an output directory and a data directory in the paths noted
-below, and place both csv datasets in the data directory.
+4. Create an output directory and a data directory in the paths noted in the script for run_spike_sz_pipeline_clean.m, and place both csv datasets in the data directory.
 
 To run the analysis, navigate to the directory containing this script and
 run
