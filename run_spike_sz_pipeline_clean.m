@@ -1,18 +1,49 @@
 function run_spike_sz_pipeline_clean()
+%% ===================== INFORMATION ==================
+%{
+This contains the code for running all analyses associated with the
+manuscript "Automated estimation of seizure and spike burden and their 
+association in a large epilepsy cohort" by Conrad et al.
+
+Requirements:
+1. spike_counts.csv and clinical_data_deidentified.csv
+     - both are available for download at: https://upenn.box.com/s/yy4o1t6nit7yu35flz59ux6zf54slg9m
+     - spike_counts.csv contains a list of spike counts at varying SpikeNet
+     probability threshold for each EEG
+     - clinical_data_deidentified.csv contains clinical information for
+     each patient. De-identified birth dates and dates of service are
+     provided by date-shifting each date relative to the date of the
+     patient's first clinic visit, defined to be Jan 1 2000. E.g., if a
+     patient's date of birth is 1/1/1980 and their first visit is 1/1/2010,
+     then their deidentified birth date is 1/1/1970. Each row is one EEG,
+     and so the same patient may appear in multiple rows.
+2. Matlab (R2024a) and the Statistics and Machine Learning Toolbox
+3. This codebase, located at: https://github.com/erinconrad/seizure_severity
+4. Create an output directory and a data directory in the paths noted
+below, and place both csv datasets in the data directory.
+
+To run the analysis, navigate to the directory containing this script and
+run
+>> run_spike_sz_pipeline_clean
+
+This function will reproduce all figures, the table, and the results text
+from the manuscript and save them in the output directory.
+%}
+
 
 %% ======================= RNG =======================
 rng(0); % for bootstrapping
 
 %% ======================= PATHS =======================
 % Inputs
-spikeSummaryMultiCsv = '../data/SN_counts/spike_counts_summary_multiThresh.csv';
-reportCsv            = '../data/Routineeegpec-Deidreport_DATA_LABELS_2025-12-11_1316.csv';
+spikeSummaryMultiCsv = '../data/spike_counts.csv';
+reportCsv            = '../data/clinical_data_deidentified.csv';
 
 % Outputs
-fig1_out   = '../figures/Fig1.png';
-fig2_out   = '../figures/Fig2.png';
-figS1_out  = '../figures/FigS1.png';
-figS2_out  = '../figures/FigS2.png';
+fig1_out   = '../output/Fig1.png';
+fig2_out   = '../output/Fig2.png';
+figS1_out  = '../output/FigS1.png';
+figS2_out  = '../output/FigS2.png';
 Table1Csv  = fullfile('..','output','Table1.csv');
 resultsHtml = '../output/results_summary.html';
 
@@ -31,11 +62,11 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];     % log10(seizures/month)
 spearman_yLims = [-1.5, 3];     % log10(spikes/hour)
 
-nBoot = 5000;
+nBoot = 5000; % bootstrap iterations to get confidence intervals
 alpha = 0.05;
 
 % SpikeNet threshold columns
-countCol = "count_0_46";
+countCol = "count_0_46"; % the probability threshold from the SpikeNet2 paper
 durCol   = "Duration_sec";
 
 % Allowed outpatient clinic visit types (other things are telephone calls,
@@ -51,7 +82,7 @@ allowable_visits = [
 %% ======================= LOAD SPIKE SUMMARY =======================
 SpikeSummaryTable = readtable(spikeSummaryMultiCsv,'TextType','string','VariableNamingRule','preserve');
 
-require_cols(SpikeSummaryTable, ["Patient","Session",countCol,durCol], "SpikeSummaryTable");
+require_cols(SpikeSummaryTable, ["Patient","Session",countCol,durCol], "SpikeSummaryTable"); % a function to check that the required columns exist
 
 SpikeSummaryTable.SpikeRate_perHour = SpikeSummaryTable.(countCol) ./ SpikeSummaryTable.(durCol) * 3600; % get spikes/hour
 
@@ -66,6 +97,18 @@ require_cols(ReportTable, ...
      "report_SPORADIC_EPILEPTIFORM_DISCHARGES","jay_focal_epi","jay_multifocal_epi","jay_gen_epi"], ...
     "ReportTable");
 
+
+%% Stats for colin gender grant (not used in the manuscript)
+%{
+% Sex (first nonmissing)
+sex_raw = upper(strtrim(string(ReportTable.nlp_gender)));
+[gs, pidS] = findgroups(ReportTable.patient_id);
+sex_per = splitapply(@local_first_nonmissing, sex_raw, gs);
+SexTableColin = innerjoin(table(unique(ReportTable.patient_id),'VariableNames',{'Patient'}), ...
+                     table(pidS,sex_per,'VariableNames',{'Patient','SexCode'}), 'Keys','Patient');
+n_f_colin = nnz(SexTableColin.SexCode=="F");
+%}
+
 %% ======================= REMOVE NON-OUTPATIENT VISITS =======================
 ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits);
 
@@ -79,19 +122,19 @@ assert_unique_keys(SpikeSummaryTable, "Patient","Session","SpikeSummaryTable");
 assert_unique_keys(ReportTable, "patient_id","session_number","ReportTable");
 
 %% ======================= BUILD VISIT-LEVEL + PATIENT-LEVEL METRICS =======================
-% Visit-level: Patient, VisitDate, Freq, HasSz, Freq_R1
-Vuniq = build_visit_level_table_R1(ReportTable);
+% Visit-level: Patient, VisitDate, Freq, HasSz, Freq_R1 
+Vuniq = build_visit_level_table_R1(ReportTable); % 1 row per visit, with information about seizure frequency
 
 % Patient typing from report 
-PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3);
+PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3); % 1 row per patient, with information about epilepsy type
 
 % Patient seizure metrics: MeanSzFreq + fraction hasSz==1 among valid visits
-SzFreqPerPatient = build_patient_seizure_metrics(Vuniq);
+SzFreqPerPatient = build_patient_seizure_metrics(Vuniq); % 1 row per patient, with mean seizure frequency across visits
 
 %% ======================= BUILD VIEW BUNDLE =======================
 Views = build_filtered_view( ...
     SpikeSummaryTable, ReportTable, PatientTypingAll, SzFreqPerPatient, ...
-    NESD_LABEL, badTypes, canonical3);
+    NESD_LABEL, badTypes, canonical3); % a structure that contains the patient level data for subsequent analyses
 
 %% ======================= FIGURE 1 (CONTROL PANELS) =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
@@ -181,6 +224,7 @@ R.visit_hasSz(mask_null_only)       = "[]";
 total_before = 0;
 total_after  = 0;
 
+% loop over rows in the clinical data report
 for i = 1:height(R)
     vt_raw    = strtrim(string(R.visit_type(i)));
     dates_raw = strtrim(string(R.visit_dates_deid(i)));
@@ -210,8 +254,10 @@ for i = 1:height(R)
     n_all = numel(vt);
     total_before = total_before + n_all;
 
+    % Check if the visit type is an allowable (outpatient) visit
     keepMask = ismember(string(vt), allowable_visits);
 
+    % remove the patient's info if no allowable visits
     if ~any(keepMask)
         R.visit_type(i)        = "[]";
         R.visit_dates_deid(i)  = "[]";
@@ -220,6 +266,7 @@ for i = 1:height(R)
         continue
     end
 
+    % Keep only the allowable visits
     vt_f    = cellstr(string(vt(keepMask)));
     dates_f = cellstr(string(dates(keepMask)));
     sz_f    = sz(keepMask);
@@ -242,6 +289,8 @@ function [S, R] = filter_outpatient_routine(S, R, durCol, MAX_ROUTINE_HOURS)
 nR0 = height(R);
 nS0 = height(S);
 
+%% Require it be an outpatient study
+
 % outpatient if acquired on an spe or radnor machine
 acqStr = lower(strtrim(string(R.acquired_on)));
 isOutpt_site  = contains(acqStr,"spe") | contains(acqStr,"radnor");
@@ -260,10 +309,12 @@ if isempty(OutptKeys)
     error('No outpatient sessions identified by site/class/jay flags.');
 end
 
-% require it's not too long (remove ambulatories)
+%% Require it be a routine EEG
+% require it's not too long (remove ambulatory EEGs)
 isRoutine = isfinite(S.(durCol)) & S.(durCol) <= MAX_ROUTINE_HOURS*3600;
 RoutineKeys = unique(S(isRoutine, {'Patient','Session'}));
 
+%% Combine both rules
 OutptRoutineKeys = innerjoin(OutptKeys, RoutineKeys, 'Keys', {'Patient','Session'});
 
 S = innerjoin(S, OutptRoutineKeys, 'Keys', {'Patient','Session'});
@@ -518,10 +569,6 @@ end
 function [f1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha)
 SessionLevel = Views.SessionLevelSpikeRates;
 Report = Views.ReportForKeptSessions;
-PL = Views.PatientLevelSpikeRates;
-
-n_ep  = nnz(Views.IsEpilepsyMask);
-n_nes = nnz(Views.IsNESDMask);
 
 % Panel A: reported spikes present/absent (resolved)
 ReportSlim = resolve_reported_spike_status(Report);
@@ -540,7 +587,7 @@ effectA = cliff_delta(x_pre, x_abs);
 Y_A = add_y_jitter_eps(to_log10_per_hour([x_abs; x_pre], EPS_RATE), log10(EPS_RATE), Y_LIMS, 0.02);
 G_A = [repmat("Absent", numel(x_abs), 1); repmat("Present", numel(x_pre), 1)];
 
-% Panel C: subtype
+% Panel B: subtype
 Sub = Views.Canonical3_SubsetTable;
 Y_C = add_y_jitter_eps(to_log10_per_hour(Sub.MeanSpikeRate_perHour, EPS_RATE), Y_ZERO, Y_LIMS, 0.02);
 
@@ -573,7 +620,7 @@ labelsA(labelsA=="Present")     = sprintf('Present (N=%d)', nnz(isfinite(x_pre))
 axA.XTickLabel = labelsA;
 axA.XTickLabelRotation = 20;   
 
-% C
+% B
 axC = nexttile; hold(axC,'on'); box(axC,'off'); grid(axC,'on');
 boxchart(axC, Sub.EpiType4, Y_C, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
 swarmchart(axC, Sub.EpiType4, Y_C, 18, 'filled','MarkerFaceAlpha',0.18);
@@ -609,7 +656,7 @@ axC.XTickLabel = labelsC;
 axC.XTickLabelRotation = 20;
 
 
-% --- Pairwise significance bars for Fig 1C (Bonferroni-corrected) ---
+% --- Pairwise significance bars for Fig 1B (Bonferroni-corrected) ---
 
 SubtypePairs = Views.Canonical3_Pairs;      % e.g. ["General","Temporal"; ...]
 p_pair_bonf  = Views.PvalsPairwiseBonf;     % length = nPairs
@@ -657,14 +704,14 @@ Fig1Stats.effectA_cliff = effectA;
 Fig1Stats.m_pre = med_pre; Fig1Stats.lo_pre = lo_pre; Fig1Stats.hi_pre = hi_pre;
 Fig1Stats.m_abs = med_abs; Fig1Stats.lo_abs = lo_abs; Fig1Stats.hi_abs = hi_abs;
 
-% Panel C omnibus
+% Panel B omnibus
 Fig1Stats.p_kw_C = p_kw;
 Fig1Stats.eta2_kw_C = eta2_kw;
 
-% Panel C pairwise (already in Views)
+% Panel B pairwise (already in Views)
 Fig1Stats.p_pair_bonf = Views.PvalsPairwiseBonf;
 
-% Panel C subtype medians + CI (bootstrap medians per group)
+% Panel B subtype medians + CI (bootstrap medians per group)
 Sub = Views.Canonical3_SubsetTable;
 subNames = string(categories(Sub.EpiType4));
 subMed = nan(numel(subNames),1);
@@ -710,6 +757,7 @@ n_anyPresent = numel(freq_anyPresent);
 
 
 p = ranksum(freq_allAbsent, freq_anyPresent, 'method','approx');
+assert(p<0.001)
 
 EPS_FREQ = 1e-3;
 Y_ZERO = log10(EPS_FREQ);
@@ -721,6 +769,7 @@ G = [repmat("All EEGs: no spikes", numel(freq_allAbsent), 1);
 
 [med1, lo1, hi1] = bootstrap_median_ci(freq_allAbsent, nBoot, alpha);
 [med2, lo2, hi2] = bootstrap_median_ci(freq_anyPresent, nBoot, alpha);
+
 
 fS2 = figure('Color','w','Position',[100 100 800 520]);
 ax = axes(fS2); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
@@ -775,6 +824,13 @@ labels(labels=="≥1 EEG: spikes present") = ...
 
 ax.XTickLabel = labels;
 ax.XTickLabelRotation = 20;
+
+%% Print stats in the command window so I can put it in the supplemental figure legend
+fprintf(['\nThe median [95%% CI] seizure frequency was %1.2f [%1.2f-%1.2f] '...
+    'for patients whose EEGs had no reported spikes '...
+    ' and %1.2f [%1.2f-%1.2f] for patients whose EEGs had reported spikes '...
+    '(p < 0.001, Cliff''s d = %1.2f).\n'], ...
+    med1,lo1,hi1,med2,lo2,hi2,cliff_delta(freq_allAbsent, freq_anyPresent))
 
 end
 
@@ -920,6 +976,7 @@ Table1_flat = table(string(OutVar), string(OutStat), 'VariableNames', {'Variable
 end
 
 %% OLD FUNCTION
+%{
 % No longer using this function, underpowered analysis
 function [fS3, PairedStats] = make_figS3_paired_and_sensitivity(Views, Vuniq, yLims_log10, nBoot, alpha)
 % Uses Vuniq (has VisitDate + Freq_R1) and session-level spikes+dates from report.
@@ -1058,6 +1115,7 @@ for ii=1:nG
 end
 set(axH,'FontSize',20);
 end
+%}
 
 function write_results_html(outPath, Views, SzFreqPerPatient, ...
     Fig1Stats, ...
@@ -1118,11 +1176,11 @@ fprintf(fid,['<p>Automatically detected spike rates were higher in EEGs with cli
             Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
             pA_str, Fig1Stats.effectA_cliff,Fig1Stats.m_abs);
 
-% Panel C omnibus
+% Panel B omnibus
 fprintf(fid,['Spike rates differed across epilepsy subtypes (Kruskal–Wallis '...
             '%s, η² ≈ %.3f). '], format_p_html(Fig1Stats.p_kw_C), Fig1Stats.eta2_kw_C);
 
-% Panel C pairwise narrative (assumes General, Temporal, Frontal exist)
+% Panel B pairwise narrative (assumes General, Temporal, Frontal exist)
 Tsub = Fig1Stats.SubtypeStatsTable;
 getRow = @(nm) Tsub(strcmp(string(Tsub.Group), string(nm)), :);
 
@@ -1218,7 +1276,8 @@ end
 %% =====================================================================
 %% ======================= PAIRED ANALYSIS CORE =========================
 %% =====================================================================
-
+%% OLD FUNCTION, UNDERPOWERED ANALYSIS, NOT USING ANYMORE
+%{
 function [r_effect, p_signed, stats_signed, nPairs, Freq_low, Freq_high] = run_paired_analysis_core(...
     SessWithDate, Vuniq_R1, EpPatients, maxDaysBefore, maxDaysAfter, min_abs_diff_spikes)
 
@@ -1311,29 +1370,17 @@ end
 r_effect = stats_signed.zval / sqrt(nPairs);
 
 end
+%}
 
 %% =====================================================================
 %% ======================= SPEARMAN FIG FUNCTION =======================
 %% =====================================================================
-% (This is your function with only minimal “safety tightening”)
 
 function [SpearmanResults, rs_all, p_all, n_all, rho_lo, rho_hi, subtype_ci] = ...
     spearman_plotting_function(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
                               canonical3, spearman_xLims, spearman_yLims, ...
                               fig_out, ...
                               freqFieldName, labelSuffix, nonZeroOnly)
-% spearman_plotting_function
-%   Makes 2x2 scatter panels:
-%     A) All epilepsy (gray)
-%     B) Frontal (yellow)
-%     C) Temporal (red)
-%     D) General (blue)
-%
-%   Computes Spearman rho + p (overall and by subtype) + bootstrap CI.
-%
-%   Assumes helpers exist in your file:
-%     - bootstrap_spearman_ci(x,y,nBoot,alpha)
-%     - set_log10_ticks(ax, whichAxis, eps_val, axisLims, maxPow)
 
 % ----------------------- params -----------------------
 nBoot = 5000;
@@ -1775,6 +1822,8 @@ U1 = R1 - n1*(n1+1)/2;
 d = (2*U1/(n1*n2)) - 1;
 end
 
+%{
+%% OLD FUNCTION
 function Diag = paired_closest_visit_diag(SessWithDate, Vuniq_R1, EpPatients, maxDaysBefore, maxDaysAfter)
 % paired_closest_visit_diag
 % For each epilepsy patient:
@@ -1894,3 +1943,5 @@ for k = 1:numel(uP)
 end
 
 end
+
+%}
