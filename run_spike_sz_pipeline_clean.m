@@ -1147,7 +1147,9 @@ n_eegs_all = height(ReportForKeptSessions);
 n_epi = nnz(Views.IsEpilepsyMask);
 
 % cohort medians + CI
-sf_vec = SzFreqPerPatient.MeanSzFreq;
+cohortPatients = Views.PatientLevelSpikeRates.Patient;  % already cohort-restricted
+Sf = innerjoin(table(cohortPatients,'VariableNames',{'Patient'}), SzFreqPerPatient, 'Keys','Patient');
+sf_vec = Sf.MeanSzFreq;
 sf_vec = sf_vec(isfinite(sf_vec));
 sf_med = median(sf_vec,'omitnan');
 [~, sf_ci_lo, sf_ci_hi] = bootstrap_median_ci(sf_vec, 5000, 0.05);
@@ -1242,12 +1244,12 @@ fprintf(fid,[' Subtype-specific correlations were significant for generalized ep
     subtype_ci_main.ci_lo(3), subtype_ci_main.ci_hi(3), format_p_html(SpearmanResults_main.p_bonf(3)));
 
 fprintf(fid,['Results were similar when restricting analyses to patients with detectable spikes, '...
-    'except that the correlation for frontal lobe epilepsy was larger and significant in this secondary analysis (Fig. S1). ']);
+    'although the correlation for frontal lobe epilepsy was larger and significant in this secondary analysis (Fig. S1). ']);
 fprintf(fid,['Patients with spikes clinically-reported on at least one EEG also had '...
     'higher mean seizure frequencies than those without spikes (Fig. S2). ']);
 fprintf(fid,['Spike-seizure correlations were stronger when clinic '...
     'visits occurred closer in time to EEG acquisition (Fig. S3), '...
-    'suggesting state-dependent variation in spike burden.</p>'])
+    'suggesting that spike rates may track seizure burden over time.</p>'])
 fprintf(fid, '</body></html>\n');
 fclose(fid);
 end
@@ -2035,7 +2037,7 @@ function NearFarStats = plot_delta_rho_histogram(Views, Vuniq, ReportForKeptSess
 %   outPng      : output file path ("" or '' to skip saving)
 %
 % NOTE: This function DEFINES near/far by quantiles of MinAbsGap_days computed across
-%       visits in Vuniq (after your filtering).
+%       visits in Vuniq.
 
 if nargin < 8, outPng = ""; end
 if nargin < 4 || isempty(nearQ), nearQ = 0.333; end
