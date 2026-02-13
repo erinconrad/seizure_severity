@@ -207,6 +207,88 @@ end
 %% ======================= CORE PIPELINE HELPERS =======================
 %% =====================================================================
 
+function Vuniq_f = restrict_visits_to_eeg_window(Vuniq, ReportForKeptSessions, windowDays)
+% Keep only clinic visits that are within +/- windowDays of ANY EEG for that patient.
+%
+% Inputs:
+%   Vuniq: table with columns Patient (double), VisitDate (datetime), Freq_R1 (double), ...
+%   ReportForKeptSessions: table with columns patient_id and start_time_deid (or Patient + start_time_deid)
+%   windowDays: scalar (e.g., 183 for ~6 months)
+%
+% Output:
+%   Vuniq_f: subset of Vuniq
+
+% ---- strict checks ----
+needV = ["Patient","VisitDate","Freq_R1"];
+missV = setdiff(needV, string(Vuniq.Properties.VariableNames));
+if ~isempty(missV)
+    error("Vuniq missing required columns: %s", strjoin(missV,", "));
+end
+
+% Accept either (patient_id) or (Patient) in report
+if ismember("Patient", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.Patient);
+elseif ismember("patient_id", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.patient_id);
+else
+    error("ReportForKeptSessions must contain Patient or patient_id.");
+end
+
+if ~ismember("start_time_deid", string(ReportForKeptSessions.Properties.VariableNames))
+    error("ReportForKeptSessions missing start_time_deid.");
+end
+
+% ---- parse EEG datetimes ----
+EEG_raw = ReportForKeptSessions.start_time_deid;
+if isdatetime(EEG_raw)
+    EEG_dt = EEG_raw;
+else
+    % handle strings like 2000-01-01T12:34:56
+    EEG_dt = datetime(strtrim(string(EEG_raw)), 'InputFormat',"yyyy-MM-dd'T'HH:mm:ss");
+end
+
+okEEG = ~isnat(EEG_dt) & isfinite(pid);
+EEG_tbl = table(pid(okEEG), EEG_dt(okEEG), 'VariableNames', {'Patient','EEG_Date'});
+if isempty(EEG_tbl)
+    error("No valid EEG dates found (start_time_deid could not be parsed).");
+end
+
+% ---- compute per-visit min distance to ANY EEG for that patient ----
+Vuniq_f = Vuniq;
+keep = false(height(Vuniq_f),1);
+
+[gv, pidV] = findgroups(Vuniq_f.Patient);
+
+for k = 1:numel(pidV)
+    p = pidV(k);
+
+    idxV = find(gv == k);
+    vDates = Vuniq_f.VisitDate(idxV);
+
+    eegDates = EEG_tbl.EEG_Date(EEG_tbl.Patient == p);
+    if isempty(eegDates)
+        % no EEG dates -> drop all visits for this patient
+        continue
+    end
+
+    % min abs gap to any EEG for each visit
+    minAbsGap = inf(numel(vDates),1);
+    for j = 1:numel(vDates)
+        minAbsGap(j) = min(abs(days(eegDates - vDates(j))));
+    end
+
+    keep(idxV) = (minAbsGap <= windowDays);
+end
+
+n_before = height(Vuniq);
+n_after  = nnz(keep);
+fprintf('[Visit-EEG window] Kept %d/%d visits (%.1f%%) within +/- %d days of an EEG\n', ...
+    n_after, n_before, 100*n_after/max(1,n_before), windowDays);
+
+Vuniq_f = Vuniq_f(keep,:);
+end
+
+
 function require_cols(T, cols, name)
 missing = setdiff(string(cols), string(T.Properties.VariableNames));
 if ~isempty(missing)
@@ -308,7 +390,7 @@ nS0 = height(S);
 
 %% Require it be an outpatient study
 
-% outpatient if acquired on an SPE or radnor machine
+% outpatient if acquired on an spe or radnor machine
 acqStr = lower(strtrim(string(R.acquired_on)));
 isOutpt_site  = contains(acqStr,"spe") | contains(acqStr,"radnor");
 
@@ -320,7 +402,7 @@ isOutpt_class = (classStr == "outpatient");
 jayStr = lower(strtrim(string(R.jay_in_or_out)));
 isOutpt_jay = (jayStr == "out");
 
-OutptKeys = unique(R(isOutpt_site | isOutpt_class | isOutpt_jay, {'patient_id','session_number'})); % If any of these outpatient conditions are true, it's outpatient
+OutptKeys = unique(R(isOutpt_site | isOutpt_class | isOutpt_jay, {'patient_id','session_number'}));
 OutptKeys.Properties.VariableNames = {'Patient','Session'};
 if isempty(OutptKeys)
     error('No outpatient sessions identified by site/class/jay flags.');
@@ -388,7 +470,7 @@ Has_agg  = splitapply(@max_hasSz, PV.HasSz, gv);
 Vuniq = table(pid_keys, date_keys, Freq_agg, Has_agg, ...
     'VariableNames', {'Patient','VisitDate','Freq','HasSz'});
 
-% Rule to fill in missing seizure frequencies: if HasSz==0 and Freq missing -> set Freq_R1=0
+% Rule 1: if HasSz==0 and Freq missing -> set Freq_R1=0
 Vuniq.Freq_R1 = Vuniq.Freq;
 mask_rule1 = ~isfinite(Vuniq.Freq_R1) & (Vuniq.HasSz==0);
 Vuniq.Freq_R1(mask_rule1) = 0;
@@ -396,7 +478,7 @@ end
 
 function SzP = build_patient_seizure_metrics(Vuniq)
 [gp, pids] = findgroups(Vuniq.Patient);
-MeanSzFreq = splitapply(@(x) mean(x,'omitnan'), Vuniq.Freq_R1, gp); % Take mean seizure frequency across visits
+MeanSzFreq = splitapply(@(x) mean(x,'omitnan'), Vuniq.Freq_R1, gp);
 FracVisits_HasSz1 = splitapply(@local_frac_hasSz1, Vuniq.HasSz, gp);
 SzP = table(pids, MeanSzFreq, FracVisits_HasSz1, ...
     'VariableNames', {'Patient','MeanSzFreq','FracVisits_HasSz1'});
@@ -438,6 +520,7 @@ for k=1:numel(uidS)
     vals = vals(strlength(vals)>0);
     if isempty(vals), espec_one(k)=""; continue; end
     if numel(vals) > 1
+        % You can relax this if you want, but conflicts here are usually real.
         error('Conflicting epilepsy_specific for Patient %g: %s', uidS(k), strjoin(vals,", "));
     end
     espec_one(k) = vals(1);
@@ -447,7 +530,7 @@ T = table(uid, etype_one, 'VariableNames', {'Patient','EpilepsyType'});
 T = outerjoin(T, table(uidS, espec_one, 'VariableNames', {'Patient','EpilepsySpecific'}), ...
     'Keys','Patient','MergeKeys',true);
 
-% Map to canonical3
+% Map to canonical3 using your rules
 spec_norm = lower(strtrim(string(T.EpilepsySpecific)));
 type_norm = lower(strtrim(string(T.EpilepsyType)));
 
@@ -490,7 +573,7 @@ PatientLevelSpikeRates.EpiType4 = TypingFiltered.EpiType3;
 etype_norm = lower(strtrim(string(PatientLevelSpikeRates.EpilepsyType)));
 IsNESDMask = (etype_norm == lower(strtrim(NESD_LABEL)));
 IsBadType  = ismember(etype_norm, badTypes) | ismissing(etype_norm) | (strlength(etype_norm)==0);
-IsEpilepsyMask = ~IsNESDMask & ~IsBadType; % It's epilepsy if it's not NESD and it's not one of the other unclear types
+IsEpilepsyMask = ~IsNESDMask & ~IsBadType;
 
 % Session-level
 SessionLevelSpikeRates = SessionsFiltered(:, {'Patient','Session','SpikeRate_perHour'});
@@ -527,6 +610,8 @@ IsEpilepsyMask = ~IsNESDMask & ~IsBadType;
 
 fprintf('[Cohort restriction] Using %d epilepsy patients with documented seizure frequency\n', ...
     numel(CohortPatients));
+% end of new cohort restriction
+
 
 PatientSpikeSz_All = innerjoin( ...
     PatientLevelSpikeRates(IsEpilepsyMask, {'Patient','MeanSpikeRate_perHour'}), ...
@@ -623,7 +708,7 @@ function [f1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, T
 SessionLevel = Views.SessionLevelSpikeRates;
 Report = Views.ReportForKeptSessions;
 
-% Panel A: reported spikes present/absent 
+% Panel A: reported spikes present/absent (resolved)
 ReportSlim = resolve_reported_spike_status(Report);
 JoinA = innerjoin(SessionLevel(:,{'Patient','Session','SpikesPerHour'}), ...
                   ReportSlim, 'Keys', {'Patient','Session'});
@@ -641,6 +726,8 @@ Y_A = add_y_jitter_eps(to_log10_per_hour([x_abs; x_pre], EPS_RATE), log10(EPS_RA
 G_A = [repmat("Absent", numel(x_abs), 1); repmat("Present", numel(x_pre), 1)];
 
 % Panel B: subtype
+%Sub = Views.Canonical3_SubsetTable;
+% Use the same typed cohort as Fig 2
 Sub = Views.PatientSpikeSz_Typed(:,{'EpiType3','MeanSpikeRate_perHour'});
 Sub.Properties.VariableNames{'EpiType3'} = 'EpiType4'; % to minimize downstream edits
 
@@ -1069,7 +1156,16 @@ fprintf(fid,'<html><head><meta charset="UTF-8"><title>Results</title></head><bod
 
 %% Table 1 general overview
 fprintf(fid, '<h2>Cohort summary</h2>\n');
-
+%{
+fprintf(fid,['<p>We included %d patients with at least one outpatient routine EEG '...
+    '(%d EEGs). %d patients (%1.1f%%) carried a '...
+    'diagnosis of epilepsy. Median [95%% CI] monthly seizure frequency was '...
+    '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
+    'was %1.2f [%1.2f-%1.2f] (Table 1).</p>'],...
+    N_total, n_eegs_all, n_epi, 100*n_epi/max(1,N_total), ...
+    sf_med, sf_ci_lo, sf_ci_hi, ...
+    sr_med, sr_ci_lo, sr_ci_hi);
+%}
 fprintf(fid,['<p>We included %d patients '...
     '(%d EEGs). Median [95%% CI] monthly seizure frequency was '...
     '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
@@ -1146,7 +1242,7 @@ fprintf(fid,['Patients with spikes clinically-reported on at least one EEG also 
     'higher mean seizure frequencies than those without spikes (Fig. S2). ']);
 fprintf(fid,['Spike-seizure correlations were stronger when clinic '...
     'visits occurred closer in time to EEG acquisition (Fig. S3), '...
-    'suggesting that spike rates may track seizure burden over time.</p>']);
+    'suggesting that spike rates may track seizure burden over time.</p>'])
 fprintf(fid, '</body></html>\n');
 fclose(fid);
 end
@@ -1192,6 +1288,105 @@ ReportSlim = ReportForKeptSessions(:, {'Patient','Session'});
 ReportSlim.ReportStatus = categorical(repCombined, ["absent","present","unknown"]);
 
 end
+
+%% =====================================================================
+%% ======================= PAIRED ANALYSIS CORE =========================
+%% =====================================================================
+%% OLD FUNCTION, UNDERPOWERED ANALYSIS, NOT USING ANYMORE
+%{
+function [r_effect, p_signed, stats_signed, nPairs, Freq_low, Freq_high] = run_paired_analysis_core(...
+    SessWithDate, Vuniq_R1, EpPatients, maxDaysBefore, maxDaysAfter, min_abs_diff_spikes)
+
+EpPatients = unique(double(EpPatients(:)));
+SessWithDate = innerjoin(SessWithDate, table(EpPatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+Vuniq_R1     = innerjoin(Vuniq_R1,     table(EpPatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+
+Pairs = table('Size',[0 7], ...
+    'VariableTypes', {'double','double','datetime','datetime','double','double','double'}, ...
+    'VariableNames', {'Patient','Session','EEG_Date','VisitDate','GapDays','SpikeRate_perHour','Freq_R1'});
+
+for pid = EpPatients'
+    S_sub = SessWithDate(SessWithDate.Patient==pid,:);
+    V_sub = Vuniq_R1(Vuniq_R1.Patient==pid,:);
+    if isempty(S_sub) || isempty(V_sub), continue; end
+
+    for j=1:height(S_sub)
+        EEGd = S_sub.EEG_Date(j);
+        gapDays = days(EEGd - V_sub.VisitDate);
+        keep = (gapDays >= -maxDaysBefore) & (gapDays <= maxDaysAfter);
+        if ~any(keep), continue; end
+
+        tmp = table( ...
+            repmat(pid, nnz(keep), 1), ...
+            repmat(S_sub.Session(j), nnz(keep), 1), ...
+            repmat(EEGd, nnz(keep), 1), ...
+            V_sub.VisitDate(keep), ...
+            gapDays(keep), ...
+            repmat(S_sub.SpikesPerHour(j), nnz(keep), 1), ...
+            V_sub.Freq_R1(keep), ...
+            'VariableNames', Pairs.Properties.VariableNames);
+        Pairs = [Pairs; tmp]; %#ok<AGROW>
+    end
+end
+
+Pairs = Pairs(isfinite(Pairs.Freq_R1) & isfinite(Pairs.SpikeRate_perHour), :);
+if isempty(Pairs)
+    r_effect = NaN; p_signed = NaN; nPairs = 0; Freq_low=[]; Freq_high=[];
+    return;
+end
+
+% closest visit per (Patient,Session)
+[grpPS, ~, ~] = findgroups(Pairs.Patient, Pairs.Session);
+keep = false(height(Pairs),1);
+for g=1:max(grpPS)
+    idx = find(grpPS==g);
+    [~,best] = min(abs(Pairs.GapDays(idx)));
+    keep(idx(best)) = true;
+end
+Pairs = Pairs(keep,:);
+
+% choose low/high spike EEG per patient, require distinct visits
+[gp, uP] = findgroups(Pairs.Patient);
+Spike_low=nan(numel(uP),1); Spike_high=nan(numel(uP),1);
+Freq_low=nan(numel(uP),1);  Freq_high=nan(numel(uP),1);
+Visit_low=NaT(numel(uP),1); Visit_high=NaT(numel(uP),1);
+
+for k=1:numel(uP)
+    idx = find(gp==k);
+    if numel(idx)<2, continue; end
+    r = Pairs.SpikeRate_perHour(idx);
+    f = Pairs.Freq_R1(idx);
+    ok = isfinite(r)&isfinite(f);
+    if nnz(ok)<2, continue; end
+    idx = idx(ok); r = r(ok); f = f(ok);
+
+    [~,iL] = min(r);
+    [~,iH] = max(r);
+    if iL==iH, continue; end
+    if r(iH)-r(iL) <= min_abs_diff_spikes, continue; end
+    if Pairs.VisitDate(idx(iL)) == Pairs.VisitDate(idx(iH)), continue; end
+
+    Spike_low(k)=r(iL); Spike_high(k)=r(iH);
+    Freq_low(k)=f(iL);  Freq_high(k)=f(iH);
+    Visit_low(k)=Pairs.VisitDate(idx(iL));
+    Visit_high(k)=Pairs.VisitDate(idx(iH));
+end
+
+valid = isfinite(Spike_low)&isfinite(Spike_high)&isfinite(Freq_low)&isfinite(Freq_high);
+Freq_low = Freq_low(valid);
+Freq_high = Freq_high(valid);
+nPairs = numel(Freq_low);
+
+if nPairs < 1
+    r_effect = NaN; p_signed = NaN;
+    return;
+end
+
+[p_signed, ~, stats_signed] = signrank(Freq_high, Freq_low, 'method','approx');
+r_effect = stats_signed.zval / sqrt(nPairs);
+
+end
+%}
 
 %% =====================================================================
 %% ======================= SPEARMAN FIG FUNCTION =======================
@@ -1871,7 +2066,7 @@ V_base = innerjoin(Vuniq, ...
     table(basePatients,'VariableNames',{'Patient'}), ...
     'Keys','Patient');
 
-% only visits with documented seizure frequency (including has Sz == 0)
+% only visits with documented seizure frequency
 V_base = V_base(isfinite(V_base.Freq_R1), :);
 
 [gpV, pidV] = findgroups(V_base.Patient);
@@ -2060,7 +2255,6 @@ p_one = mean(delta <= 0);                           % H1: near > far
 p_two = 2*min(mean(delta <= 0), mean(delta >= 0));  % two-sided bootstrap p
 
 % ------------------ Plot: gaps (top) + delta rho (bottom) ------------------
-
 fig = figure('Color','w','Position',[120 80 950 780]);
 tl = tiledlayout(fig, 2, 1, 'TileSpacing','compact', 'Padding','compact');
 
@@ -2187,7 +2381,6 @@ NearFarStats.gapsUsed = gaps;
 
 end
 
-%% Sex analysis not used in the manuscript
 function [fS4, SexStats] = make_figS4_spike_by_sex(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha)
 % make_figS4_spike_by_sex
 % Plot patient-level mean spike rate (spikes/hour) for women vs men WITH EPILEPSY

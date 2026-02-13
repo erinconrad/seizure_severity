@@ -1069,7 +1069,16 @@ fprintf(fid,'<html><head><meta charset="UTF-8"><title>Results</title></head><bod
 
 %% Table 1 general overview
 fprintf(fid, '<h2>Cohort summary</h2>\n');
-
+%{
+fprintf(fid,['<p>We included %d patients with at least one outpatient routine EEG '...
+    '(%d EEGs). %d patients (%1.1f%%) carried a '...
+    'diagnosis of epilepsy. Median [95%% CI] monthly seizure frequency was '...
+    '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
+    'was %1.2f [%1.2f-%1.2f] (Table 1).</p>'],...
+    N_total, n_eegs_all, n_epi, 100*n_epi/max(1,N_total), ...
+    sf_med, sf_ci_lo, sf_ci_hi, ...
+    sr_med, sr_ci_lo, sr_ci_hi);
+%}
 fprintf(fid,['<p>We included %d patients '...
     '(%d EEGs). Median [95%% CI] monthly seizure frequency was '...
     '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
@@ -1146,7 +1155,7 @@ fprintf(fid,['Patients with spikes clinically-reported on at least one EEG also 
     'higher mean seizure frequencies than those without spikes (Fig. S2). ']);
 fprintf(fid,['Spike-seizure correlations were stronger when clinic '...
     'visits occurred closer in time to EEG acquisition (Fig. S3), '...
-    'suggesting that spike rates may track seizure burden over time.</p>']);
+    'suggesting that spike rates may track seizure burden over time.</p>'])
 fprintf(fid, '</body></html>\n');
 fclose(fid);
 end
@@ -1192,6 +1201,105 @@ ReportSlim = ReportForKeptSessions(:, {'Patient','Session'});
 ReportSlim.ReportStatus = categorical(repCombined, ["absent","present","unknown"]);
 
 end
+
+%% =====================================================================
+%% ======================= PAIRED ANALYSIS CORE =========================
+%% =====================================================================
+%% OLD FUNCTION, UNDERPOWERED ANALYSIS, NOT USING ANYMORE
+%{
+function [r_effect, p_signed, stats_signed, nPairs, Freq_low, Freq_high] = run_paired_analysis_core(...
+    SessWithDate, Vuniq_R1, EpPatients, maxDaysBefore, maxDaysAfter, min_abs_diff_spikes)
+
+EpPatients = unique(double(EpPatients(:)));
+SessWithDate = innerjoin(SessWithDate, table(EpPatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+Vuniq_R1     = innerjoin(Vuniq_R1,     table(EpPatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+
+Pairs = table('Size',[0 7], ...
+    'VariableTypes', {'double','double','datetime','datetime','double','double','double'}, ...
+    'VariableNames', {'Patient','Session','EEG_Date','VisitDate','GapDays','SpikeRate_perHour','Freq_R1'});
+
+for pid = EpPatients'
+    S_sub = SessWithDate(SessWithDate.Patient==pid,:);
+    V_sub = Vuniq_R1(Vuniq_R1.Patient==pid,:);
+    if isempty(S_sub) || isempty(V_sub), continue; end
+
+    for j=1:height(S_sub)
+        EEGd = S_sub.EEG_Date(j);
+        gapDays = days(EEGd - V_sub.VisitDate);
+        keep = (gapDays >= -maxDaysBefore) & (gapDays <= maxDaysAfter);
+        if ~any(keep), continue; end
+
+        tmp = table( ...
+            repmat(pid, nnz(keep), 1), ...
+            repmat(S_sub.Session(j), nnz(keep), 1), ...
+            repmat(EEGd, nnz(keep), 1), ...
+            V_sub.VisitDate(keep), ...
+            gapDays(keep), ...
+            repmat(S_sub.SpikesPerHour(j), nnz(keep), 1), ...
+            V_sub.Freq_R1(keep), ...
+            'VariableNames', Pairs.Properties.VariableNames);
+        Pairs = [Pairs; tmp]; %#ok<AGROW>
+    end
+end
+
+Pairs = Pairs(isfinite(Pairs.Freq_R1) & isfinite(Pairs.SpikeRate_perHour), :);
+if isempty(Pairs)
+    r_effect = NaN; p_signed = NaN; nPairs = 0; Freq_low=[]; Freq_high=[];
+    return;
+end
+
+% closest visit per (Patient,Session)
+[grpPS, ~, ~] = findgroups(Pairs.Patient, Pairs.Session);
+keep = false(height(Pairs),1);
+for g=1:max(grpPS)
+    idx = find(grpPS==g);
+    [~,best] = min(abs(Pairs.GapDays(idx)));
+    keep(idx(best)) = true;
+end
+Pairs = Pairs(keep,:);
+
+% choose low/high spike EEG per patient, require distinct visits
+[gp, uP] = findgroups(Pairs.Patient);
+Spike_low=nan(numel(uP),1); Spike_high=nan(numel(uP),1);
+Freq_low=nan(numel(uP),1);  Freq_high=nan(numel(uP),1);
+Visit_low=NaT(numel(uP),1); Visit_high=NaT(numel(uP),1);
+
+for k=1:numel(uP)
+    idx = find(gp==k);
+    if numel(idx)<2, continue; end
+    r = Pairs.SpikeRate_perHour(idx);
+    f = Pairs.Freq_R1(idx);
+    ok = isfinite(r)&isfinite(f);
+    if nnz(ok)<2, continue; end
+    idx = idx(ok); r = r(ok); f = f(ok);
+
+    [~,iL] = min(r);
+    [~,iH] = max(r);
+    if iL==iH, continue; end
+    if r(iH)-r(iL) <= min_abs_diff_spikes, continue; end
+    if Pairs.VisitDate(idx(iL)) == Pairs.VisitDate(idx(iH)), continue; end
+
+    Spike_low(k)=r(iL); Spike_high(k)=r(iH);
+    Freq_low(k)=f(iL);  Freq_high(k)=f(iH);
+    Visit_low(k)=Pairs.VisitDate(idx(iL));
+    Visit_high(k)=Pairs.VisitDate(idx(iH));
+end
+
+valid = isfinite(Spike_low)&isfinite(Spike_high)&isfinite(Freq_low)&isfinite(Freq_high);
+Freq_low = Freq_low(valid);
+Freq_high = Freq_high(valid);
+nPairs = numel(Freq_low);
+
+if nPairs < 1
+    r_effect = NaN; p_signed = NaN;
+    return;
+end
+
+[p_signed, ~, stats_signed] = signrank(Freq_high, Freq_low, 'method','approx');
+r_effect = stats_signed.zval / sqrt(nPairs);
+
+end
+%}
 
 %% =====================================================================
 %% ======================= SPEARMAN FIG FUNCTION =======================
@@ -2187,7 +2295,6 @@ NearFarStats.gapsUsed = gaps;
 
 end
 
-%% Sex analysis not used in the manuscript
 function [fS4, SexStats] = make_figS4_spike_by_sex(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha)
 % make_figS4_spike_by_sex
 % Plot patient-level mean spike rate (spikes/hour) for women vs men WITH EPILEPSY
