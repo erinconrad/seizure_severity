@@ -455,6 +455,7 @@ E3 = strings(height(T),1);
 E3(contains(spec_norm,"temporal")) = "Temporal";
 E3(contains(spec_norm,"frontal"))  = "Frontal";
 E3((strlength(E3)==0) & contains(type_norm,"general")) = "General";
+%E3((strlength(E3)==0) & strcmp(type_norm,"general")) = "General";
 
 T.EpiType3 = categorical(E3, canonical3);
 end
@@ -462,11 +463,29 @@ end
 %% =====================================================================
 %% ======================= VIEW BUNDLE (CLEAN) =========================
 %% =====================================================================
-
 function Views = build_filtered_view(SessionsFiltered, ReportIn, PatientTypingAll, SzFreqPerPatient, ...
                                      NESD_LABEL, badTypes, canonical3)
+% build_filtered_view
+% Cohort + analysis tables with a SINGLE subtype variable throughout: EpiType3
+% EpiType3 definition comes ONLY from build_patient_typing_from_report().
+%
+% Key invariants:
+% - Epilepsy/NESD masks are computed from TypingFiltered.EpilepsyType (not from spike table).
+% - PatientLevelSpikeRates always carries EpilepsyType/EpilepsySpecific/EpiType3 via join to TypingFiltered.
+% - Fig 1 subtype panel, Fig 2 subtype panels, Table 1 subtype counts use EpiType3 only.
+%
+% Inputs:
+%   SessionsFiltered: table with Patient, Session, SpikeRate_perHour (after outpatient+routine filtering)
+%   ReportIn:         clinical report table (one row per EEG)
+%   PatientTypingAll: output of build_patient_typing_from_report (one row per patient)
+%   SzFreqPerPatient: output of build_patient_seizure_metrics (one row per patient)
+%   NESD_LABEL:       label for NESD
+%   badTypes:         excluded epilepsy_type values (lowercase strings)
+%   canonical3:       string array like ["General","Temporal","Frontal"]
 
+%% ------------------ Join report to kept sessions ------------------
 SessKeys = unique(SessionsFiltered(:,{'Patient','Session'}));
+
 ReportForKeptSessions = innerjoin(ReportIn, SessKeys, ...
     'LeftKeys', {'patient_id','session_number'}, ...
     'RightKeys', {'Patient','Session'});
@@ -474,52 +493,61 @@ ReportForKeptSessions = innerjoin(ReportIn, SessKeys, ...
 ReportForKeptSessions.Patient = double(ReportForKeptSessions.patient_id);
 ReportForKeptSessions.Session = double(ReportForKeptSessions.session_number);
 
-PatientsKept = unique(SessionsFiltered.Patient);
-TypingFiltered = innerjoin(PatientTypingAll, table(PatientsKept,'VariableNames',{'Patient'}), 'Keys','Patient');
+%% ------------------ Restrict typing to patients with ≥1 kept EEG ------------------
+PatientsKept  = unique(double(SessionsFiltered.Patient));
+TypingFiltered = innerjoin(PatientTypingAll, table(PatientsKept,'VariableNames',{'Patient'}), ...
+    'Keys','Patient');
 
-
-% Patient-level mean spike rate
-[gpS, pidsS] = findgroups(SessionsFiltered.Patient);
+%% ------------------ Patient-level mean spike rate ------------------
+[gpS, pidsS] = findgroups(double(SessionsFiltered.Patient));
 MeanSpikeRate_perHour = splitapply(@(x) mean(x,'omitnan'), SessionsFiltered.SpikeRate_perHour, gpS);
-PatientLevelSpikeRates = table(pidsS, MeanSpikeRate_perHour, 'VariableNames', {'Patient','MeanSpikeRate_perHour'});
-PatientLevelSpikeRates = innerjoin(PatientLevelSpikeRates, TypingFiltered, 'Keys','Patient');
-PatientLevelSpikeRates.EpiType4 = TypingFiltered.EpiType3;
 
+PatientLevelSpikeRates = table(double(pidsS), MeanSpikeRate_perHour, ...
+    'VariableNames', {'Patient','MeanSpikeRate_perHour'});
 
-% Epilepsy vs NESD masks
+% Bring in EpilepsyType/EpilepsySpecific/EpiType3 ONCE
+needTypingCols = {'Patient','EpilepsyType','EpilepsySpecific','EpiType3'};
+missingT = setdiff(string(needTypingCols), string(TypingFiltered.Properties.VariableNames));
+if ~isempty(missingT)
+    error("TypingFiltered missing required cols: %s", strjoin(missingT,", "));
+end
+
+PatientLevelSpikeRates = innerjoin(PatientLevelSpikeRates, ...
+    TypingFiltered(:, needTypingCols), 'Keys','Patient');
+
+%% ------------------ Epilepsy vs NESD masks (from typing) ------------------
 etype_norm = lower(strtrim(string(PatientLevelSpikeRates.EpilepsyType)));
+
 IsNESDMask = (etype_norm == lower(strtrim(NESD_LABEL)));
 IsBadType  = ismember(etype_norm, badTypes) | ismissing(etype_norm) | (strlength(etype_norm)==0);
-IsEpilepsyMask = ~IsNESDMask & ~IsBadType; % It's epilepsy if it's not NESD and it's not one of the other unclear types
+IsEpilepsyMask = ~IsNESDMask & ~IsBadType;
 
-% Session-level
+%% ------------------ Session-level spike rates ------------------
 SessionLevelSpikeRates = SessionsFiltered(:, {'Patient','Session','SpikeRate_perHour'});
 SessionLevelSpikeRates.Properties.VariableNames{'SpikeRate_perHour'} = 'SpikesPerHour';
 
-% Spearman tables
+%% ------------------ Seizure-frequency tables aligned to kept patients ------------------
 SzFreqFiltered = innerjoin(SzFreqPerPatient, table(PatientsKept,'VariableNames',{'Patient'}), 'Keys','Patient');
+
 EpPatients = table(PatientLevelSpikeRates.Patient(IsEpilepsyMask), 'VariableNames', {'Patient'});
 SzFreqEpilepsy = innerjoin(SzFreqFiltered, EpPatients, 'Keys','Patient');
 
-% ===================== DEFINE MAIN ANALYSIS COHORT =====================
+%% ===================== DEFINE MAIN ANALYSIS COHORT =====================
 % Epilepsy + documented seizure frequency
 CohortPatients = SzFreqEpilepsy.Patient(isfinite(SzFreqEpilepsy.MeanSzFreq));
 CohortPatients = unique(CohortPatients);
 CohortTable = table(CohortPatients, 'VariableNames', {'Patient'});
 
-% ===================== RESTRICT ALL DOWNSTREAM TABLES ==================
-% Patient-level tables
+%% ===================== RESTRICT ALL DOWNSTREAM TABLES ==================
 PatientLevelSpikeRates = innerjoin(PatientLevelSpikeRates, CohortTable, 'Keys','Patient');
 TypingFiltered         = innerjoin(TypingFiltered,         CohortTable, 'Keys','Patient');
 
-% Session-level + report tables (Fig 1A, Fig S2)
 SessionsFiltered      = innerjoin(SessionsFiltered,      CohortTable, 'Keys','Patient');
 ReportForKeptSessions = innerjoin(ReportForKeptSessions, CohortTable, 'Keys','Patient');
 
-% Seizure-frequency table (keep consistent)
 SzFreqEpilepsy = innerjoin(SzFreqEpilepsy, CohortTable, 'Keys','Patient');
 
-% Recompute epilepsy masks AFTER restriction
+% Recompute masks after restriction (aligned to PatientLevelSpikeRates rows)
 etype_norm = lower(strtrim(string(PatientLevelSpikeRates.EpilepsyType)));
 IsNESDMask = (etype_norm == lower(strtrim(NESD_LABEL)));
 IsBadType  = ismember(etype_norm, badTypes) | ismissing(etype_norm) | (strlength(etype_norm)==0);
@@ -528,6 +556,7 @@ IsEpilepsyMask = ~IsNESDMask & ~IsBadType;
 fprintf('[Cohort restriction] Using %d epilepsy patients with documented seizure frequency\n', ...
     numel(CohortPatients));
 
+%% ------------------ Build Spearman input tables ------------------
 PatientSpikeSz_All = innerjoin( ...
     PatientLevelSpikeRates(IsEpilepsyMask, {'Patient','MeanSpikeRate_perHour'}), ...
     SzFreqEpilepsy, 'Keys','Patient');
@@ -535,46 +564,36 @@ PatientSpikeSz_All = innerjoin( ...
 keepAll = isfinite(PatientSpikeSz_All.MeanSpikeRate_perHour) & isfinite(PatientSpikeSz_All.MeanSzFreq);
 PatientSpikeSz_All = PatientSpikeSz_All(keepAll,:);
 
-keepCanon3 = ~ismissing(TypingFiltered.EpiType3) & ismember(TypingFiltered.EpiType3, canonical3);
-SzFreqCanon = innerjoin(SzFreqEpilepsy, TypingFiltered(keepCanon3, {'Patient','EpiType3'}), 'Keys','Patient');
+% Typed subset: require EpiType3 in canonical3 and not missing
+keepCanon3 = ~ismissing(PatientLevelSpikeRates.EpiType3) & ismember(string(PatientLevelSpikeRates.EpiType3), canonical3);
+TypedPatients = PatientLevelSpikeRates.Patient(IsEpilepsyMask & keepCanon3);
 
-PatientSpikeSz_Typed = innerjoin( ...
-    PatientLevelSpikeRates(IsEpilepsyMask, {'Patient','MeanSpikeRate_perHour'}), ...
-    SzFreqCanon, 'Keys','Patient');
-
-keepTyped = isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perHour) & isfinite(PatientSpikeSz_Typed.MeanSzFreq) & ~ismissing(PatientSpikeSz_Typed.EpiType3);
-PatientSpikeSz_Typed = PatientSpikeSz_Typed(keepTyped,:);
-
-% Canonical3 group stats for Fig1C
-EpiType4 = strings(height(PatientLevelSpikeRates),1);
-et_low = lower(strtrim(string(PatientLevelSpikeRates.EpilepsyType)));
-es_low = lower(strtrim(string(PatientLevelSpikeRates.EpilepsySpecific)));
-
-isGeneralType = contains(et_low, "general");
-isTemporal    = contains(es_low, "temporal");
-isFrontal     = contains(es_low, "frontal");
-
-EpiType4(isGeneralType)                            = "General";
-EpiType4(~isGeneralType & isTemporal)              = "Temporal";
-EpiType4(~isGeneralType & ~isTemporal & isFrontal) = "Frontal";
-
-PatientLevelSpikeRates.EpiType4 = categorical(EpiType4, canonical3);
-
-% Use the SAME subtype definition as Fig 2 (EpiType3)
-InCanonical3Mask = ismember(TypingFiltered.EpiType3, canonical3);
-
-Canonical3_SubsetTable = innerjoin( ...
-    TypingFiltered(InCanonical3Mask, {'Patient','EpiType3'}), ...
-    PatientLevelSpikeRates(:, {'Patient','MeanSpikeRate_perHour'}), ...
+SzFreqCanon = innerjoin(SzFreqEpilepsy, ...
+    PatientLevelSpikeRates(IsEpilepsyMask & keepCanon3, {'Patient','EpiType3'}), ...
     'Keys','Patient');
 
+PatientSpikeSz_Typed = innerjoin( ...
+    PatientLevelSpikeRates(IsEpilepsyMask & ismember(PatientLevelSpikeRates.Patient, TypedPatients), ...
+        {'Patient','MeanSpikeRate_perHour'}), ...
+    SzFreqCanon, 'Keys','Patient');
+
+keepTyped = isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perHour) & ...
+            isfinite(PatientSpikeSz_Typed.MeanSzFreq) & ...
+            ~ismissing(PatientSpikeSz_Typed.EpiType3);
+PatientSpikeSz_Typed = PatientSpikeSz_Typed(keepTyped,:);
+
+%% ------------------ Canonical3 group stats (for Fig 1 subtype panel) ------------------
+Canonical3_SubsetTable = PatientLevelSpikeRates(IsEpilepsyMask & keepCanon3, ...
+    {'Patient','EpiType3','MeanSpikeRate_perHour'});
+
+% Rename for downstream compatibility if you want to keep existing plotting code:
 Canonical3_SubsetTable.Properties.VariableNames{'EpiType3'} = 'EpiType4';
 
 [g3, cats3] = findgroups(Canonical3_SubsetTable.EpiType4);
 medVals = splitapply(@(x) median(x,'omitnan'), Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
-p25Vals = splitapply(@(x) prctile(x,25), Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
-p75Vals = splitapply(@(x) prctile(x,75), Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
-nVals   = splitapply(@(x) sum(isfinite(x)), Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
+p25Vals = splitapply(@(x) prctile(x,25),      Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
+p75Vals = splitapply(@(x) prctile(x,75),      Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
+nVals   = splitapply(@(x) sum(isfinite(x)),   Canonical3_SubsetTable.MeanSpikeRate_perHour, g3);
 
 Canonical3_Stats = table(cats3, nVals, medVals, p25Vals, p75Vals, ...
     'VariableNames', {'EpiType4','GroupCount','Median','P25','P75'});
@@ -587,14 +606,17 @@ p_pair = NaN(3,1);
 for i = 1:3
     A = Canonical3_Pairs(i,1);
     B = Canonical3_Pairs(i,2);
-    xa = Canonical3_SubsetTable.MeanSpikeRate_perHour(Canonical3_SubsetTable.EpiType4==categorical(A,canonical3));
-    xb = Canonical3_SubsetTable.MeanSpikeRate_perHour(Canonical3_SubsetTable.EpiType4==categorical(B,canonical3));
+    xa = Canonical3_SubsetTable.MeanSpikeRate_perHour( ...
+        Canonical3_SubsetTable.EpiType4 == categorical(A, canonical3));
+    xb = Canonical3_SubsetTable.MeanSpikeRate_perHour( ...
+        Canonical3_SubsetTable.EpiType4 == categorical(B, canonical3));
     if nnz(isfinite(xa))>=3 && nnz(isfinite(xb))>=3
         p_pair(i) = ranksum(xa, xb, 'method','approx');
     end
 end
 p_pair_bonf = min(p_pair*3, 1);
 
+%% ------------------ Bundle outputs ------------------
 Views.SessionsForFigures     = SessionsFiltered;
 Views.ReportForKeptSessions  = ReportForKeptSessions;
 Views.PatientTypingFiltered  = TypingFiltered;
@@ -613,7 +635,9 @@ Views.Canonical3_Stats       = Canonical3_Stats;
 Views.Canonical3_Pairs       = Canonical3_Pairs;
 Views.PvalsPairwise          = p_pair;
 Views.PvalsPairwiseBonf      = p_pair_bonf;
+
 end
+
 
 %% =====================================================================
 %% ======================= FIGURES + TABLES ============================
@@ -929,18 +953,33 @@ n_epi = nnz(Views.IsEpilepsyMask);
 n_pnes = nnz(Views.IsNESDMask);
 n_dx_unk = N_total - n_epi - n_pnes;
 
-% Subtype (among epilepsy)
-E4 = string(PL.EpiType4);
-isTemp  = (E4=="Temporal") & Views.IsEpilepsyMask;
-isFront = (E4=="Frontal")  & Views.IsEpilepsyMask;
-isGen   = (E4=="General")  & Views.IsEpilepsyMask;
-typing = strtrim(string(PL.EpilepsySpecific));
-isSubUnk = Views.IsEpilepsyMask & ~(isTemp|isFront|isGen) & ...
-    (typing=="Unknown or MRN not found" | typing=="Unclassified or Unspecified" | typing=="");
-isOther = Views.IsEpilepsyMask & ~(isTemp|isFront|isGen) & ~isSubUnk;
+% --- Subtype (among epilepsy) ---
+E3 = strtrim(string(PL.EpiType3));
+espec = strtrim(string(PL.EpilepsySpecific));
 
-n_temp = nnz(isTemp); n_front = nnz(isFront); n_gen = nnz(isGen);
-n_other = nnz(isOther); n_subunk = nnz(isSubUnk);
+isTemp  = (E3=="Temporal") & Views.IsEpilepsyMask;
+isFront = (E3=="Frontal")  & Views.IsEpilepsyMask;
+isGen   = (E3=="General")  & Views.IsEpilepsyMask;
+
+isCanon = isTemp | isFront | isGen;
+
+% Unknown: no canonical subtype AND explicitly unclassified/unspecified (or missing)
+isUnknown = Views.IsEpilepsyMask & ~isCanon & ( ...
+    ismissing(espec) | espec=="" | ...
+    espec=="Unclassified or Unspecified" | ...
+    espec=="Unknown or MRN not found");
+
+% Other: epilepsy with some non-canonical localization/type info
+isOther = Views.IsEpilepsyMask & ~isCanon & ~isUnknown;
+
+% Counts
+n_temp    = nnz(isTemp);
+n_front   = nnz(isFront);
+n_gen     = nnz(isGen);
+n_other   = nnz(isOther);
+n_subunk  = nnz(isUnknown);
+
+
 
 % Visits per patient
 V_all = Vuniq(:,{'Patient','VisitDate'});
