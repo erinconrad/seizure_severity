@@ -454,8 +454,8 @@ type_norm = lower(strtrim(string(T.EpilepsyType)));
 E3 = strings(height(T),1);
 E3(contains(spec_norm,"temporal")) = "Temporal";
 E3(contains(spec_norm,"frontal"))  = "Frontal";
-E3((strlength(E3)==0) & contains(type_norm,"general")) = "General";
-%E3((strlength(E3)==0) & strcmp(type_norm,"general")) = "General";
+%E3((strlength(E3)==0) & contains(type_norm,"general")) = "General";
+E3((strlength(E3)==0) & strcmp(type_norm,"general")) = "General";
 
 T.EpiType3 = categorical(E3, canonical3);
 end
