@@ -119,19 +119,19 @@ ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits);
 [SpikeSummaryTable, ReportTable] = filter_outpatient_routine( ...
     SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS); % this removes EEGs that are inpatient or too long
 
-% Sanity: keys match 1:1 (both the spike summary and report table should
+% Sanity check: keys match 1:1 (both the spike summary and report table should
 % only have one row for each unique patient-session combo)
 assert_unique_keys(SpikeSummaryTable, "Patient","Session","SpikeSummaryTable");
 assert_unique_keys(ReportTable, "patient_id","session_number","ReportTable");
 
 %% ======================= BUILD VISIT-LEVEL + PATIENT-LEVEL METRICS =======================
-% Visit-level: Patient, VisitDate, Freq, HasSz, Freq_R1 
+% Visit-level information: Patient, VisitDate, Freq, HasSz, Freq_R1 
 Vuniq = build_visit_level_table_R1(ReportTable); % 1 row per visit, with information about seizure frequency
 
 % Patient typing from report 
 PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3); % 1 row per patient, with information about epilepsy type
 
-% Patient seizure metrics: MeanSzFreq + fraction hasSz==1 among valid visits
+% Patient-level seizure metrics: MeanSzFreq + fraction hasSz==1 among valid visits
 SzFreqPerPatient = build_patient_seizure_metrics(Vuniq); % 1 row per patient, with mean seizure frequency across visits
 
 %% ======================= BUILD VIEW BUNDLE =======================
@@ -181,8 +181,6 @@ plot_delta_rho_histogram( ...
 save_fig(FigS4, figS4_out);
 fprintf('Saved Fig S4: %s\n', figS4_out);
 
-% Optional: print a concise stat line
-fprintf('[Fig S4] ranksum women vs men: %s\n', p_label(FigS4Stats.p_rankSum));
 %}
 
 %% ======================= TABLE 1 =======================
