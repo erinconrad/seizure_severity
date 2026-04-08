@@ -37,9 +37,9 @@ rng(1); % for bootstrapping
 %% ======================= PATHS =======================
 % Inputs
 spikeSummaryMultiCsv = '../data/spike_counts.csv'; % PUT THIS IN YOUR PATH
-%reportCsv            = '../data/clinical_data_deidentified.csv'; % PUT THIS IN YOUR PATH
+reportCsv            = '../data/clinical_data_deidentified.csv'; % PUT THIS IN YOUR PATH
 %reportCsv = '../data/Routineeegpec-Deidreport_DATA_LABELS_2026-03-11_0854.csv';
-reportCsv = '../data/Routineeegpec-Deidreport_DATA_LABELS_2026-03-11_0911.csv';
+%reportCsv = '../data/Routineeegpec-Deidreport_DATA_LABELS_2026-03-11_0911.csv';
 
 % Outputs (PUT THE OUTPUT FOLDER IN YOUR PATH)
 fig1_out   = '../output/Fig1.png';
@@ -156,6 +156,7 @@ end
 
 % Do model
 MMR = fit_mixed_effects_models(PairTable, nBoot);
+%MMR = fit_mixed_effects_models(PairTable, 0);
 
 
 %% ======================= FIGURE 1 (CONTROL PANELS) =======================
