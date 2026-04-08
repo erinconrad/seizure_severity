@@ -1,4 +1,4 @@
-function run_spike_sz_pipeline_clean()
+function spike_phq2()
 %% ===================== INFORMATION ==================
 %{
 This contains the code for running all analyses associated with the
@@ -37,7 +37,9 @@ rng(1); % for bootstrapping
 %% ======================= PATHS =======================
 % Inputs
 spikeSummaryMultiCsv = '../data/spike_counts.csv'; % PUT THIS IN YOUR PATH
-reportCsv            = '../data/clinical_data_deidentified.csv'; % PUT THIS IN YOUR PATH
+%reportCsv            = '../data/clinical_data_deidentified.csv'; % PUT THIS IN YOUR PATH
+%reportCsv = '../data/Routineeegpec-Deidreport_DATA_LABELS_2026-03-11_0854.csv';
+reportCsv = '../data/Routineeegpec-Deidreport_DATA_LABELS_2026-03-11_0911.csv';
 
 % Outputs (PUT THE OUTPUT FOLDER IN YOUR PATH)
 fig1_out   = '../output/Fig1.png';
@@ -45,6 +47,7 @@ fig2_out   = '../output/Fig2.png';
 figS1_out  = '../output/FigS1.png';
 figS2_out  = '../output/FigS2.png';
 figS3_out  = '../output/FigS3.png';
+figS4_out  = '../output/FigS4.png';
 
 Table1Csv  = fullfile('..','output','Table1.csv');
 resultsHtml = '../output/results_summary.html';
@@ -117,6 +120,8 @@ n_f_colin = nnz(SexTableColin.SexCode=="F");
 %% ======================= REMOVE NON-OUTPATIENT VISITS =======================
 ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits);
 
+ReportTable = filter_phq2_arrays_to_retained_visits(ReportTable);
+
 %% ======================= OUTPATIENT + ROUTINE EEG FILTER =======================
 [SpikeSummaryTable, ReportTable] = filter_outpatient_routine( ...
     SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS); % this removes EEGs that are inpatient or too long
@@ -136,9 +141,12 @@ PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3); % 
 % Patient-level seizure metrics: MeanSzFreq + fraction hasSz==1 among valid visits
 SzFreqPerPatient = build_patient_seizure_metrics(Vuniq); % 1 row per patient, with mean seizure frequency across visits
 
+PHQ2PerPatient = build_patient_phq2_metrics(ReportTable);
+
 % Patients differ between two above tables because PatientTypingAll ok with
 % patients without SzFreq and SzFreqPerPatient ok with non-epilepsy
 % patients
+
 
 %% ======================= BUILD VIEW BUNDLE =======================
 Views = build_filtered_view( ...
@@ -146,6 +154,91 @@ Views = build_filtered_view( ...
     NESD_LABEL, badTypes, canonical3); % a structure that contains the patient level data for subsequent analyses
 % This filters to epilepsy patients with documented sz frequency and at
 % least one outpatient EEG
+
+%% ======================= PHQ2 VS SEIZURE FREQUENCY =======================
+
+PatientSzPHQ2 = innerjoin( ...
+    SzFreqPerPatient(:,{'Patient','MeanSzFreq'}), ...
+    PHQ2PerPatient(:,{'Patient','MeanPHQ2'}), ...
+    'Keys','Patient');
+
+% restrict to the same cohort used in main analyses
+PatientSzPHQ2 = innerjoin( ...
+    PatientSzPHQ2, ...
+    table(Views.PatientLevelSpikeRates.Patient,'VariableNames',{'Patient'}), ...
+    'Keys','Patient');
+
+keep = isfinite(PatientSzPHQ2.MeanSzFreq) & ...
+       isfinite(PatientSzPHQ2.MeanPHQ2);
+
+PatientSzPHQ2 = PatientSzPHQ2(keep,:);
+
+n_phq2_sz = height(PatientSzPHQ2);
+
+if n_phq2_sz >= 3
+
+    [rho_sz_phq2, p_sz_phq2] = corr( ...
+        PatientSzPHQ2.MeanPHQ2, ...
+        PatientSzPHQ2.MeanSzFreq, ...
+        'Type','Spearman', ...
+        'Rows','complete');
+
+    [~, rho_lo_sz_phq2, rho_hi_sz_phq2] = bootstrap_spearman_ci( ...
+        PatientSzPHQ2.MeanPHQ2, ...
+        PatientSzPHQ2.MeanSzFreq, ...
+        nBoot, alpha);
+
+    fprintf(['\nPHQ2 vs seizure frequency:\n' ...
+        'N patients: %d\n' ...
+        'Spearman rho = %1.2f [95%% CI %1.2f-%1.2f]\n' ...
+        '%s\n'], ...
+        n_phq2_sz, rho_sz_phq2, rho_lo_sz_phq2, rho_hi_sz_phq2, ...
+        p_label(p_sz_phq2));
+
+else
+    warning('Not enough patients with PHQ2 + seizure frequency.');
+end
+
+
+%% ======================= PHQ2 VS SPIKE RATE =======================
+PatientSpikePHQ2 = innerjoin( ...
+    Views.PatientLevelSpikeRates(:, {'Patient','MeanSpikeRate_perHour','EpiType3'}), ...
+    PHQ2PerPatient, ...
+    'Keys','Patient');
+
+keepPHQ2 = isfinite(PatientSpikePHQ2.MeanSpikeRate_perHour) & ...
+           isfinite(PatientSpikePHQ2.MeanPHQ2);
+
+PatientSpikePHQ2 = PatientSpikePHQ2(keepPHQ2,:);
+
+if height(PatientSpikePHQ2) >= 3
+    [rho_phq2, p_phq2] = corr( ...
+        PatientSpikePHQ2.MeanSpikeRate_perHour, ...
+        PatientSpikePHQ2.MeanPHQ2, ...
+        'Type','Spearman', ...
+        'Rows','complete');
+
+    [~, rho_lo_phq2, rho_hi_phq2] = bootstrap_spearman_ci( ...
+        PatientSpikePHQ2.MeanSpikeRate_perHour, ...
+        PatientSpikePHQ2.MeanPHQ2, ...
+        nBoot, alpha);
+
+    fprintf(['\nPHQ2 analysis:\n' ...
+        'N patients: %d\n' ...
+        'Spearman rho = %1.2f [95%% CI %1.2f-%1.2f]\n' ...
+        '%s\n'], ...
+        height(PatientSpikePHQ2), rho_phq2, rho_lo_phq2, rho_hi_phq2, p_label(p_phq2));
+else
+    warning('Not enough patients with PHQ2 data for correlation.');
+end
+
+if height(PatientSpikePHQ2) >= 3
+    [rho_phq2, p_phq2, n_phq2, rho_lo_phq2, rho_hi_phq2] = ...
+        plot_spike_phq2_correlation(PatientSpikePHQ2, figS4_out, nBoot, alpha);
+
+end
+
+plot_phq2_seizure_corr(PatientSzPHQ2,'../output/Fig_PHQ2_vs_sz.png')
 
 %% ======================= FIGURE 1 (CONTROL PANELS) =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
@@ -1617,14 +1710,7 @@ if any(mask)
     Yj(mask) = Yj(mask) + (rand(sum(mask),1)-0.5)*amp;
 end
 end
-%{
-function add_sigbar(ax, x1, x2, y, ptext)
-tick = 0.03 * diff(ax.YLim);
-plot(ax, [x1 x1 x2 x2], [y-tick, y, y, y-tick], 'k-', 'LineWidth', 1.3);
-text(ax, mean([x1 x2]), y +0.001*diff(ax.YLim), ptext, ...
-    'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',20);
-end
-%}
+
 
 function add_sigbar(ax, x1, x2, y, ptext)
 
@@ -1746,7 +1832,8 @@ end
 
 
 function GapTable = compute_visit_eeg_gaps(Vuniq, ReportForKeptSessions)
-% Returns one row per visit with min |visit - EEG| in days
+% Returns one row per visit with min |visit - EEG| in days (how many days
+% away is the closest eeg)
 
 % ---- checks ----
 require_cols(Vuniq, ["Patient","VisitDate"], "Vuniq");
@@ -1883,18 +1970,8 @@ function NearFarStats = plot_delta_rho_histogram(Views, Vuniq, ReportForKeptSess
 % NOTE: This function DEFINES near/far by quantiles of MinAbsGap_days computed across
 %       visits in Vuniq.
 
-if nargin < 8, outPng = ""; end
-if nargin < 4 || isempty(nearQ), nearQ = 0.333; end
-if nargin < 5 || isempty(farQ),  farQ  = 0.667; end
-if nargin < 6 || isempty(nBoot), nBoot = 5000; end
-if nargin < 7 || isempty(alpha), alpha = 0.05; end
-
 % ------------------ Base cohort patients (match main Spearman cohort) ------------------
-if isfield(Views, 'PatientSpikeSz_All') && ~isempty(Views.PatientSpikeSz_All)
-    basePatients = unique(double(Views.PatientSpikeSz_All.Patient));
-else
-    basePatients = unique(double(Views.PatientLevelSpikeRates.Patient));
-end
+basePatients = unique(double(Views.PatientSpikeSz_All.Patient));
 
 SpikeTbl = Views.PatientLevelSpikeRates(:, {'Patient','MeanSpikeRate_perHour'});
 SpikeTbl.Patient = double(SpikeTbl.Patient);
@@ -1999,6 +2076,7 @@ if n < 3
     error("Not enough patients with BOTH near and far seizure metrics (n=%d).", n);
 end
 
+% Spikes, sz frequency for near visits, seizure frequency for far visits
 x  = double(J.MeanSpikeRate_perHour);
 yN = double(J.MeanSzFreq_near);
 yF = double(J.MeanSzFreq_far);
@@ -2080,7 +2158,7 @@ delta_obs = rho_near - rho_far;
 % ------------------ Patient-level bootstrap ------------------
 delta = nan(nBoot,1);
 for b = 1:nBoot
-    idx = randi(n, n, 1);
+    idx = randi(n, n, 1); % resample patients
     rn = corr(x(idx), yN(idx), 'Type','Spearman', 'Rows','complete');
     rf = corr(x(idx), yF(idx), 'Type','Spearman', 'Rows','complete');
     delta(b) = rn - rf;
@@ -2346,3 +2424,194 @@ fprintf(['\nSex analysis (epilepsy only):\n' ...
 end
 
 
+function R = filter_phq2_arrays_to_retained_visits(R)
+% Keep only PHQ2 entries whose dates match retained visit_dates_deid.
+% Assumes visit_type/visit_dates_deid were already filtered to allowable outpatient visits.
+
+need = ["visit_dates_deid","phq2_dates_deid","phq2_scores"];
+missing = setdiff(need, string(R.Properties.VariableNames));
+if ~isempty(missing)
+    error('filter_phq2_arrays_to_retained_visits: missing columns: %s', strjoin(missing,", "));
+end
+
+for i = 1:height(R)
+    kept_visit_dates_raw = strtrim(string(R.visit_dates_deid(i)));
+    phq_dates_raw        = strtrim(string(R.phq2_dates_deid(i)));
+    phq_scores_raw       = strtrim(string(R.phq2_scores(i)));
+
+    if kept_visit_dates_raw=="" || kept_visit_dates_raw=="[]" || kept_visit_dates_raw=="<missing>"
+        keptDates = strings(0,1);
+    else
+        keptDates = json_to_string_array(kept_visit_dates_raw);
+    end
+
+    if phq_dates_raw=="" || phq_dates_raw=="[]" || phq_dates_raw=="<missing>"
+        R.phq2_dates_deid(i) = "[]";
+        R.phq2_scores(i)     = "[]";
+        continue
+    end
+
+    phqDates = json_to_string_array(phq_dates_raw);
+    phqScore = json_to_double_array(phq_scores_raw);
+
+    if numel(phqDates) ~= numel(phqScore)
+        error('Row %d: phq2_dates_deid and phq2_scores have mismatched lengths (%d vs %d).', ...
+            i, numel(phqDates), numel(phqScore));
+    end
+
+    if isempty(phqDates) || isempty(keptDates)
+        R.phq2_dates_deid(i) = "[]";
+        R.phq2_scores(i)     = "[]";
+        continue
+    end
+
+    keepMask = ismember(string(phqDates), string(keptDates));
+
+    phqDates_f = cellstr(string(phqDates(keepMask)));
+    phqScore_f = phqScore(keepMask);
+
+    R.phq2_dates_deid(i) = string(jsonencode(phqDates_f));
+    R.phq2_scores(i)     = string(jsonencode(phqScore_f));
+end
+end
+
+function PHQ2P = build_patient_phq2_metrics(R)
+% Explode PHQ2 arrays, collapse duplicate patient-date entries,
+% then average PHQ2 across visits for each patient.
+
+need = ["patient_id","phq2_dates_deid","phq2_scores"];
+missing = setdiff(need, string(R.Properties.VariableNames));
+if ~isempty(missing)
+    error('build_patient_phq2_metrics: missing columns: %s', strjoin(missing,", "));
+end
+
+PV = table('Size',[0 3], ...
+    'VariableTypes', {'double','datetime','double'}, ...
+    'VariableNames', {'Patient','PHQ2Date','PHQ2'});
+
+for j = 1:height(R)
+    pid = double(R.patient_id(j));
+
+    ds = strtrim(string(R.phq2_dates_deid(j)));
+    ss = strtrim(string(R.phq2_scores(j)));
+
+    if ds=="" || ds=="[]" || ds=="<missing>"
+        continue
+    end
+
+    d = string(jsondecode(char(ds)));
+    d = datetime(d, 'InputFormat', 'yyyy-MM-dd');
+
+    s = regexprep(ss, 'null', 'NaN', 'ignorecase');
+    v = double(jsondecode(char(s)));
+    v(~isfinite(v)) = NaN;
+
+    if numel(d) ~= numel(v)
+        error('Row %d (patient %g): PHQ2 arrays mismatched (%d dates, %d scores).', ...
+            j, pid, numel(d), numel(v));
+    end
+
+    if isempty(d)
+        continue
+    end
+
+    PV = [PV; table(repmat(pid,numel(d),1), d(:), v(:), ...
+        'VariableNames', PV.Properties.VariableNames)]; %#ok<AGROW>
+end
+
+if isempty(PV)
+    PHQ2P = table([], [], [], ...
+        'VariableNames', {'Patient','MeanPHQ2','N_PHQ2_Visits'});
+    return
+end
+
+% Collapse duplicate patient-date observations caused by repeated EEG rows
+[g1, pid1, date1] = findgroups(PV.Patient, PV.PHQ2Date);
+PHQ2_byDate = splitapply(@(x) mean(x,'omitnan'), PV.PHQ2, g1);
+
+PVuniq = table(pid1, date1, PHQ2_byDate, ...
+    'VariableNames', {'Patient','PHQ2Date','PHQ2'});
+
+% Then average across visit dates within patient
+[g2, pid2] = findgroups(PVuniq.Patient);
+MeanPHQ2 = splitapply(@(x) mean(x,'omitnan'), PVuniq.PHQ2, g2);
+N_PHQ2_Visits = splitapply(@(x) sum(isfinite(x)), PVuniq.PHQ2, g2);
+
+PHQ2P = table(pid2, MeanPHQ2, N_PHQ2_Visits, ...
+    'VariableNames', {'Patient','MeanPHQ2','N_PHQ2_Visits'});
+end
+
+function [rho, p, n, rho_lo, rho_hi] = plot_spike_phq2_correlation(PatientSpikePHQ2, outPath, nBoot, alpha)
+
+x = double(PatientSpikePHQ2.MeanPHQ2);
+y = double(PatientSpikePHQ2.MeanSpikeRate_perHour);
+
+mask = isfinite(x) & isfinite(y);
+x = x(mask);
+y = y(mask);
+n = numel(x);
+
+if n < 3
+    error('Not enough patients with PHQ2 data (n=%d).', n);
+end
+
+[rho, p] = corr(x, y, 'Type','Spearman', 'Rows','complete');
+[~, rho_lo, rho_hi] = bootstrap_spearman_ci(x, y, nBoot, alpha);
+
+eps_rate = 30e-3;
+ylog = log10(max(y, eps_rate));
+
+f = figure('Color','w','Position',[100 100 700 550]);
+ax = axes(f); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+
+scatter(ax, x, ylog, 24, 'filled', 'MarkerFaceAlpha', 0.3);
+
+X = [ones(n,1), x];
+b = X \ ylog;
+xg = linspace(min(x), max(x), 200)';
+plot(ax, xg, b(1) + b(2)*xg, 'k-', 'LineWidth', 2);
+
+ylabel(ax, 'Spikes/hour (log scale)');
+xlabel(ax, 'Mean PHQ-2 score');
+set_log10_ticks(ax, 'y', eps_rate, [-2 4]);
+ylim(ax, [-2 4]);
+
+title(ax, sprintf('Spike rate vs mean PHQ-2 (N=%d)', n));
+text(ax, 0.98, 0.95, sprintf('\\rho=%.2f [%.2f-%.2f], %s', rho, rho_lo, rho_hi, p_label(p)), ...
+    'Units','normalized', 'HorizontalAlignment','right', 'VerticalAlignment','top', ...
+    'FontSize', 16, 'FontWeight','bold');
+
+if strlength(string(outPath)) > 0
+    if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
+    exportgraphics(f, outPath, 'Resolution', 300);
+end
+end
+
+function plot_phq2_seizure_corr(PatientSzPHQ2, outPath)
+
+x = double(PatientSzPHQ2.MeanPHQ2);
+y = double(PatientSzPHQ2.MeanSzFreq);
+
+mask = isfinite(x) & isfinite(y);
+x = x(mask);
+y = y(mask);
+
+eps_sz = 1e-3;
+ylog = log10(max(y,eps_sz));
+
+f = figure('Color','w','Position',[100 100 650 520]);
+ax = axes(f); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+
+scatter(ax, x, ylog, 24, 'filled','MarkerFaceAlpha',0.3);
+
+X = [ones(numel(x),1) x];
+b = X \ ylog;
+xg = linspace(min(x),max(x),200)';
+plot(ax, xg, b(1)+b(2)*xg,'k-','LineWidth',2);
+
+xlabel(ax,'Mean PHQ-2 score');
+ylabel(ax,'Seizures/month (log scale)');
+set_log10_ticks(ax,'y',1e-3,[-3 4]);
+
+exportgraphics(f,outPath,'Resolution',300);
+end

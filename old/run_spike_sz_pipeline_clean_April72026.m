@@ -46,8 +46,7 @@ fig1_out   = '../output/Fig1.png';
 fig2_out   = '../output/Fig2.png';
 figS1_out  = '../output/FigS1.png';
 figS2_out  = '../output/FigS2.png';
-figMain_out  = '../output/FigModel.png';
-figCV_out     = '../output/FigCV.png';
+figS3_out  = '../output/FigS3.png';
 
 Table1Csv  = fullfile('..','output','Table1.csv');
 resultsHtml = '../output/results_summary.html';
@@ -84,6 +83,8 @@ allowable_visits = [
     "RPV MANAGEMENT DURING COVID-19","TELEHEALTH VIDEO VISIT RETURN"
 ];
 
+low_tertile = 0.333; % low tertile gap for figure S3
+high_tertile = 0.667; % high tertile gap for figure S3
 
 %% ======================= LOAD SPIKE SUMMARY =======================
 SpikeSummaryTable = readtable(spikeSummaryMultiCsv,'TextType','string','VariableNamingRule','preserve');
@@ -103,6 +104,17 @@ require_cols(ReportTable, ...
      "report_SPORADIC_EPILEPTIFORM_DISCHARGES","jay_focal_epi","jay_multifocal_epi","jay_gen_epi"], ...
     "ReportTable");
 
+
+%% Stats for gender (not used in the manuscript)
+%{
+% Sex (first nonmissing)
+sex_raw = upper(strtrim(string(ReportTable.nlp_gender)));
+[gs, pidS] = findgroups(ReportTable.patient_id);
+sex_per = splitapply(@local_first_nonmissing, sex_raw, gs);
+SexTableColin = innerjoin(table(unique(ReportTable.patient_id),'VariableNames',{'Patient'}), ...
+                     table(pidS,sex_per,'VariableNames',{'Patient','SexCode'}), 'Keys','Patient');
+n_f_colin = nnz(SexTableColin.SexCode=="F");
+%}
 
 %% ======================= REMOVE NON-OUTPATIENT VISITS =======================
 ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits);
@@ -137,33 +149,10 @@ Views = build_filtered_view( ...
 % This filters to epilepsy patients with documented sz frequency and at
 % least one outpatient EEG
 
-%% ======================= DO MODEL =======================
-
-PairTable = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
-                                            Views.ReportForKeptSessions, Views.PatientTypingFiltered);
-fprintf('Total pairs: %d\n', height(PairTable));
-fprintf('Unique patients: %d\n', numel(unique(PairTable.Patient)));
-fprintf('Unique EEGs: %d\n', numel(unique(PairTable.EEG_ID)));
-fprintf('Unique visits: %d\n', numel(unique(string(PairTable.Patient) + "_" + string(PairTable.VisitDate))));
-
-subtypes = unique(PairTable.EpiType3);
-for i = 1:numel(subtypes)
-    n_pts = numel(unique(PairTable.Patient(PairTable.EpiType3 == subtypes(i))));
-    n_pairs = sum(PairTable.EpiType3 == subtypes(i));
-    fprintf('%s: %d patients, %d pairs\n', subtypes(i), n_pts, n_pairs);
-end
-
-
-% Do model
-MMR = fit_mixed_effects_models(PairTable, nBoot);
-
-
 %% ======================= FIGURE 1 (CONTROL PANELS) =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
 save_fig(Fig1, fig1_out);
 fprintf('Saved Fig 1: %s\n', fig1_out);
-
-
 
 %% ======================= FIGURE 2 + FIG S1 (SPEARMAN) =======================
 PatientSpikeSz_All   = Views.PatientSpikeSz_All;
@@ -179,22 +168,10 @@ PatientSpikeSz_Typed = Views.PatientSpikeSz_Typed;
     spearman_plotting_function(PatientSpikeSz_All, PatientSpikeSz_Typed, ...
         canonical3, spearman_xLims, spearman_yLims, ...
         figS1_out, ...
-        'MeanSzFreq', ' (positive spike/seizures only)', true);
+        'MeanSzFreq', ' (positive spike rates only)', true);
 
 fprintf('Saved Fig 2:  %s\n', fig2_out);
 fprintf('Saved Fig S1: %s\n', figS1_out);
-
-%% ======================= FIGURE 3 (MODEL) =======================
-
-[FigMain, FigCV] = make_figures_and_cv(...
-    MMR, ...
-    Views, ...
-    Vuniq, ...
-    Views.ReportForKeptSessions, ...
-    ["Temporal","Frontal","General"], ...
-    5, ...
-    figMain_out, ...
-    figCV_out);
 
 %% ======================= FIG S2 (SZ FREQ BY REPORTED SPIKES ACROSS EEGs) =======================
 FigS2 = make_figS2_sz_by_reported_spikes(Views, SzFreqPerPatient, nBoot, alpha, spearman_xLims);
@@ -202,22 +179,30 @@ save_fig(FigS2, figS2_out);
 fprintf('Saved Fig S2: %s\n', figS2_out);
 
 
+%% ======================= FIG S3 (NEAR VS FAR CORRELATION (PAIRED BOOTSTRAP)) ====================
+plot_delta_rho_histogram( ...
+    Views, Vuniq, Views.ReportForKeptSessions, ...
+    low_tertile, high_tertile, nBoot, alpha, ...
+    figS3_out);
+
+%% ======================= FIG S4 (SPIKE RATE BY SEX, not used in manuscript) =======================
+%{
+[FigS4, FigS4Stats] = make_figS4_spike_by_sex(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
+
+
+%}
+
 %% ======================= TABLE 1 =======================
 Table1_flat = build_table1_flat(Views, SzFreqPerPatient, Vuniq, EPS_RATE, nBoot, alpha);
 if ~exist(fileparts(Table1Csv),'dir'), mkdir(fileparts(Table1Csv)); end
 writetable(Table1_flat, Table1Csv);
 fprintf('Wrote Table 1 CSV: %s\n', Table1Csv);
 
-%% ======================= TABLE S1 =======================
-tableS1Csv = fullfile('..','output','TableS1.csv');
-write_tableS1(MMR, tableS1Csv);
-fprintf('Wrote Table S1 CSV: %s\n', tableS1Csv);
-
 %% ======================= WRITE HTML SUMMARY =======================
 write_results_html(resultsHtml, Views, SzFreqPerPatient, ...
     Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, rho_lo_main, rho_hi_main, subtype_ci_main, ...
-    Views.ReportForKeptSessions, MMR);
+    Views.ReportForKeptSessions);
 
 fprintf('Wrote HTML summary: %s\n', resultsHtml);
 
@@ -1108,7 +1093,7 @@ end
 function write_results_html(outPath, Views, SzFreqPerPatient, ...
     Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, rho_lo_main, rho_hi_main, subtype_ci_main, ...
-    ReportForKeptSessions, MMR)
+    ReportForKeptSessions)
 
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 fid = fopen(outPath,'w');
@@ -1121,8 +1106,11 @@ N_total = numel(AllPatients);
 % EEG count (after outpatient+routine filtering)
 n_eegs_all = height(ReportForKeptSessions);
 
+% Epilepsy count
+n_epi = nnz(Views.IsEpilepsyMask);
+
 % cohort medians + CI
-cohortPatients = Views.PatientLevelSpikeRates.Patient;
+cohortPatients = Views.PatientLevelSpikeRates.Patient;  % already cohort-restricted
 Sf = innerjoin(table(cohortPatients,'VariableNames',{'Patient'}), SzFreqPerPatient, 'Keys','Patient');
 sf_vec = Sf.MeanSzFreq;
 sf_vec = sf_vec(isfinite(sf_vec));
@@ -1136,142 +1124,90 @@ sr_med = median(sr_vec,'omitnan');
 
 fprintf(fid,'<html><head><meta charset="UTF-8"><title>Results</title></head><body>\n');
 
-%% ---- Cohort summary ----
+%% Table 1 general overview
 fprintf(fid, '<h2>Cohort summary</h2>\n');
-fprintf(fid,['<p>We included %d patients (%d EEGs). Median [95%% CI] monthly seizure ' ...
-    'frequency was %1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs ' ...
-    'was %1.2f [%1.2f-%1.2f] (Table 1).</p>'], ...
+
+fprintf(fid,['<p>We included %d patients '...
+    '(%d EEGs). Median [95%% CI] monthly seizure frequency was '...
+    '%1.2f [%1.2f-%1.2f], and median [95%% CI] spikes/hour across EEGs '...
+    'was %1.2f [%1.2f-%1.2f] (Table 1).</p>'],...
     N_total, n_eegs_all, ...
     sf_med, sf_ci_lo, sf_ci_hi, ...
     sr_med, sr_ci_lo, sr_ci_hi);
 
-%% ---- Figure 1 ----
+%% ---- Figure 1: Control Panels ----
 fprintf(fid, '<h2>Spike rates by patient groups</h2>\n');
 
+% Panel A
 pA_str = format_p_html(Fig1Stats.p_rankSum_A);
-fprintf(fid,['<p>Automatically detected spike rates were higher in EEGs with ' ...
-    'clinically-reported spikes (median spike rate %.2f [95%% CI %.2f-%.2f] spikes/hour) ' ...
-    'than in EEGs without reported spikes (%.2f [%.2f-%.2f] spikes/hour) ' ...
-    '(%s, Cliff''s &delta; = %.2f; Fig. 1A), suggesting a low false-positive detection rate. '], ...
-    Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
-    Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
-    pA_str, Fig1Stats.effectA_cliff);
+fprintf(fid,['<p>Automatically detected spike rates were higher in EEGs with clinically-reported spikes '...
+            '(median spike rate %.2f [95%% CI %.2f-%.2f] spikes/hour) than '...
+            'in EEGs without reported spikes (%.2f [%.2f-%.2f] '...
+            'spikes/hour) (%s, Cliff''s &delta; = %.2f; Fig. 1A), '...
+            'suggesting a low false-positive detection rate. '],...
+            Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
+            Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
+            pA_str, Fig1Stats.effectA_cliff);
 
-fprintf(fid,['Spike rates differed across epilepsy subtypes (Kruskal-Wallis %s, ' ...
-    '&eta;&sup2; &asymp; %.3f), with higher rates in generalized epilepsy than ' ...
-    'temporal or frontal lobe epilepsy (Fig. 1B).</p>'], ...
-    format_p_html(Fig1Stats.p_kw_C), Fig1Stats.eta2_kw_C);
+% Panel B omnibus
+fprintf(fid,['Spike rates differed across epilepsy subtypes (Kruskal–Wallis '...
+            '%s, η² ≈ %.3f), '], format_p_html(Fig1Stats.p_kw_C), Fig1Stats.eta2_kw_C);
 
-%% ---- Figure 2 ----
-fprintf(fid, '<h2>Relationship between spike rate and seizure frequency (Figure 2)</h2>\n');
+% Panel B pairwise narrative (assumes General, Temporal, Frontal exist)
+Tsub = Fig1Stats.SubtypeStatsTable;
+getRow = @(nm) Tsub(strcmp(string(Tsub.Group), string(nm)), :);
 
-fprintf(fid,['<p>Spike rate and seizure frequency were positively correlated ' ...
-    '(N = %d, &rho; = %.2f [95%% CI %.2f-%.2f], %s). '], ...
+rG = getRow("General");
+rT = getRow("Temporal");
+rF = getRow("Frontal");
+
+p_pair_bonf = Fig1Stats.p_pair_bonf; % [G vs T; G vs F; T vs F]
+fprintf(fid,['with higher rates in generalized epilepsy than '...
+    'temporal or frontal lobe epilepsy (Fig. 1B).'])
+
+fprintf(['Generalized epilepsy demonstrated higher spike rates '...
+            '(%.2f [%.2f-%.2f]) than temporal '...
+            '(%.2f [%.2f-%.2f]; Bonferroni-adjusted '...
+            '%s) and frontal '...
+            '(%.2f [%.2f-%.2f]; '...
+            '%s). The temporal versus frontal comparison '...
+            'was not significant (%s; Fig. 1B).</p>'],...
+            rG.Median, rG.CI_lo, rG.CI_hi, ...
+            rT.Median, rT.CI_lo, rT.CI_hi, format_p_html(p_pair_bonf(1)), ...
+            rF.Median, rF.CI_lo, rF.CI_hi, format_p_html(p_pair_bonf(2)), ...
+            format_p_html(p_pair_bonf(3)));
+%}
+
+%% ---- Figure 2: Spearman correlations ----
+fprintf(fid, '<h2>Relationship between spike rate and seizure frequency</h2>\n');
+
+fprintf(fid,['<p>Spike rate '...
+    'and seizure frequency were positively correlated '...
+    '(N = %d, &rho; = %.2f [95%% CI %.2f-%.2f], %s).'], ...
     n_all_main, rs_all_main, rho_lo_main, rho_hi_main, format_p_html(p_all_main));
 
-fprintf(fid,['Subtype-specific correlations were significant for generalized epilepsy ' ...
-    '(N = %d, &rho; = %.2f [%.2f-%.2f], Bonferroni-adjusted %s) and temporal lobe epilepsy ' ...
-    '(N = %d, &rho; = %.2f [%.2f-%.2f], %s), but not frontal lobe epilepsy ' ...
-    '(N = %d, &rho; = %.2f [%.2f-%.2f], %s; Fig. 2A-D). '], ...
+fprintf(fid,[' Subtype-specific correlations were significant for generalized epilepsy '...
+    '(N = %d, &rho; = %.2f [%.2f-%.2f], Bonferroni-adjusted %s) and '...
+    'temporal lobe epilepsy (N = %d, &rho; = %.2f [%.2f-%.2f], %s), but not frontal '...
+    'lobe epilepsy (N = %d, &rho; = %.2f [%.2f-%.2f], %s; Fig 2A-D). '],...
     SpearmanResults_main.N(1), SpearmanResults_main.Spearman_r(1), ...
-    subtype_ci_main.ci_lo(1), subtype_ci_main.ci_hi(1), ...
-    format_p_html(SpearmanResults_main.p_bonf(1)), ...
+    subtype_ci_main.ci_lo(1), subtype_ci_main.ci_hi(1), format_p_html(SpearmanResults_main.p_bonf(1)), ...
     SpearmanResults_main.N(2), SpearmanResults_main.Spearman_r(2), ...
-    subtype_ci_main.ci_lo(2), subtype_ci_main.ci_hi(2), ...
-    format_p_html(SpearmanResults_main.p_bonf(2)), ...
+    subtype_ci_main.ci_lo(2), subtype_ci_main.ci_hi(2), format_p_html(SpearmanResults_main.p_bonf(2)), ...
     SpearmanResults_main.N(3), SpearmanResults_main.Spearman_r(3), ...
-    subtype_ci_main.ci_lo(3), subtype_ci_main.ci_hi(3), ...
-    format_p_html(SpearmanResults_main.p_bonf(3)));
+    subtype_ci_main.ci_lo(3), subtype_ci_main.ci_hi(3), format_p_html(SpearmanResults_main.p_bonf(3)));
 
-fprintf(fid,['Results were similar when restricting analyses to patients with detectable ' ...
-    'spikes and non-zero seizure frequencies (Fig. S1). ']);
-fprintf(fid,['Patients with spikes clinically-reported on at least one EEG had higher ' ...
-    'mean seizure frequencies than those without spikes (Fig. S2).</p>']);
-
-%% ---- Figure 3: Mixed effects model ----
-fprintf(fid, '<h2>Mixed effects model results (Figure 3)</h2>\n');
-
-% Pull results from MMR — use bootstrap CIs if available, else Laplace
-if ~isempty(MMR.BootstrapTable4)
-    BT = MMR.BootstrapTable4;
-    ci_source = 'bootstrap';
-else
-    % Fall back to Laplace CIs from fixed effects table
-    BT = MMR.FE_logistic_proxonly;
-    BT.Properties.VariableNames{'OR_lo'} = 'OR_CI_lo';
-    BT.Properties.VariableNames{'OR_hi'} = 'OR_CI_hi';
-    ci_source = 'Laplace approximation';
-end
-
-fprintf(fid, '<p><em>CIs from %s.</em></p>\n', ci_source);
-
-% Helper to extract a row by term name
-getRow = @(tbl, nm) tbl(string(tbl.Term) == nm, :);
-
-% Key terms
-r_spike   = getRow(BT, 'LogSpikesPerHour');
-r_abslag  = getRow(BT, 'AbsLag_years');
-r_dir     = getRow(BT, 'LagDirection');
-r_int     = getRow(BT, 'LogSpikesPerHour:AbsLag_years');
-r_frontal = getRow(BT, 'EpiType3_cat_Frontal');
-r_general = getRow(BT, 'EpiType3_cat_General');
-
-% Pull p-values from fixed effects table (not bootstrap table)
-FE4 = MMR.FE_logistic_proxonly;
-getP = @(nm) FE4.p(string(FE4.Term) == nm);
-
-% Pair table info
-T_mod = MMR.ModelTable;
-n_pairs = height(T_mod);
-n_pats  = numel(unique(T_mod.Patient));
-
-fprintf(fid,['<p>To formally test the association between spike rate and seizure ' ...
-    'occurrence while accounting for repeated EEG-visit observations within patients, ' ...
-    'we constructed a table of all EEG-visit pairs (N = %d pairs from %d patients) ' ...
-    'and fit a logistic mixed effects model with spike rate, absolute EEG-visit lag, ' ...
-    'lag direction, and epilepsy subtype as fixed effects and a random intercept for ' ...
-    'patient. '], n_pairs, n_pats);
-
-fprintf(fid,['Higher log spike rates were associated with significantly higher odds of ' ...
-    'reporting seizures at a clinic visit (OR = %.2f [95%% CI %.2f-%.2f], %s; Fig. 3A). '], ...
-    r_spike.OR, r_spike.OR_CI_lo, r_spike.OR_CI_hi, ...
-    format_p_html(getP('LogSpikesPerHour')));
-
-fprintf(fid,['The spike-seizure association was significantly attenuated at greater ' ...
-    'temporal distances between the EEG and clinic visit (log spike rate &times; ' ...
-    'absolute lag interaction: OR = %.3f [%.3f-%.3f], %s; Fig. 3B), indicating that ' ...
-    'spike rate is most informative when measured close in time to the clinical assessment. '], ...
-    r_int.OR, r_int.OR_CI_lo, r_int.OR_CI_hi, ...
-    format_p_html(getP('LogSpikesPerHour:AbsLag_years')));
-
-% LRT results
-fprintf(fid,['A likelihood ratio test confirmed that the proximity interaction ' ...
-    'significantly improved model fit over a model without interactions ' ...
-    '(&chi;&sup2;(1), %s). '], ...
-    format_p_html(8.44e-7)); % LRT 3 p-value — hardcoded for now, see note below
-
-fprintf(fid,['Clinic visits occurring after the EEG were associated with lower ' ...
-    'baseline odds of seizure reporting than visits before the EEG ' ...
-    '(OR = %.2f [%.2f-%.2f], %s), consistent with patients improving over time ' ...
-    'following their initial EEG evaluation. '], ...
-    r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, ...
-    format_p_html(getP('LagDirection')));
-
-fprintf(fid,['Compared with temporal lobe epilepsy, generalized epilepsy was ' ...
-    'associated with lower baseline odds of seizure reporting at the same spike rate ' ...
-    '(OR = %.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ ' ...
-    'significantly (OR = %.2f [%.2f-%.2f], %s). '], ...
-    r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, ...
-    format_p_html(getP('EpiType3_cat_General')), ...
-    r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, ...
-    format_p_html(getP('EpiType3_cat_Frontal')));
-
-fprintf(fid,['Results were consistent when using log-transformed continuous seizure ' ...
-    'frequency as the outcome in a linear mixed effects model (Table S1).</p>\n']);
-
+fprintf(fid,['Results were similar when restricting analyses to patients with detectable spikes, '...
+    'although the correlation for frontal lobe epilepsy was larger and significant in this secondary analysis (Fig. S1). ']);
+fprintf(fid,['Patients with spikes clinically-reported on at least one EEG also had '...
+    'higher mean seizure frequencies than those without spikes (Fig. S2). ']);
+fprintf(fid,['Spike-seizure correlations were stronger when clinic '...
+    'visits occurred closer in time to EEG acquisition (Fig. S3), '...
+    'suggesting that spike rates may track seizure burden over time.</p>']);
 fprintf(fid, '</body></html>\n');
 fclose(fid);
 end
+
 
 %% =====================================================================
 %% ======================= REPORT STATUS RESOLUTION =====================
@@ -1346,7 +1282,7 @@ y_all = double(PatientSpikeSz_All.(freqFieldName));
 
 mask_all = isfinite(x_all) & isfinite(y_all);
 if nonZeroOnly
-    mask_all = mask_all & (x_all > 0) & (y_all > 0); % exclude zeros for both spike rate AND seizure frequency
+    mask_all = mask_all & (x_all > 0); % only require non-zero spikes, allow zero szs
 end
 n_all = sum(mask_all);
 
@@ -1372,9 +1308,9 @@ for ii = 1:numel(canonical3)
 
     mask = isfinite(x) & isfinite(y);
     if nonZeroOnly
-        mask = mask & (x > 0) & (y > 0); % require non zero
+        %mask = mask & (x > 0) & (y > 0); % require non zero
     %spikes and non zero szs
-        %mask = mask & (x > 0); % only require non-zero spikes, allow zero szs
+        mask = mask & (x > 0); % only require non-zero spikes, allow zero szs
     end
     n = sum(mask);
 
@@ -1803,1207 +1739,597 @@ d = (2*U1/(n1*n2)) - 1;
 end
 
 
-function PairTable = build_eeg_visit_pairs(Vuniq, SessionLevelSpikeRates, ...
-                                            ReportForKeptSessions, PatientTyping)
-%% build_eeg_visit_pairs
-% Builds a table with one row per (Patient, EEG, Visit) combination.
-%
-% Inputs:
-%   Vuniq                  : visit-level table with Patient, VisitDate, Freq_R1, HasSz
-%   SessionLevelSpikeRates : EEG-level table with Patient, Session, SpikesPerHour
-%   ReportForKeptSessions  : EEG report table with Patient, Session, start_time_deid
-%   PatientTyping          : patient-level table with Patient, EpiType3
-%
-% Output:
-%   PairTable : one row per (Patient, EEG Session, Visit) with:
-%       Patient, Session, VisitDate, SpikesPerHour,
-%       SzFreq, HasSz, SignedLag_days, EpiType3
 
-%% ---- Parse EEG datetimes ----
+function GapTable = compute_visit_eeg_gaps(Vuniq, ReportForKeptSessions)
+% Returns one row per visit with min |visit - EEG| in days (how many days
+% away is the closest eeg)
+
+% ---- checks ----
+require_cols(Vuniq, ["Patient","VisitDate"], "Vuniq");
+
+if ismember("Patient", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.Patient);
+elseif ismember("patient_id", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.patient_id);
+else
+    error("ReportForKeptSessions must have Patient or patient_id");
+end
+
+require_cols(ReportForKeptSessions, ["start_time_deid"], "ReportForKeptSessions");
+
+% ---- EEG datetimes ----
 EEG_raw = ReportForKeptSessions.start_time_deid;
 if isdatetime(EEG_raw)
     EEG_dt = EEG_raw;
 else
     EEG_dt = datetime(strtrim(string(EEG_raw)), ...
-        'InputFormat', "yyyy-MM-dd'T'HH:mm:ss");
+        'InputFormat',"yyyy-MM-dd'T'HH:mm:ss");
 end
 
-% Build slim EEG date table (one row per EEG)
-EEG_dates = table(...
-    double(ReportForKeptSessions.Patient), ...
-    double(ReportForKeptSessions.Session), ...
-    EEG_dt, ...
-    'VariableNames', {'Patient','Session','EEG_Date'});
+EEG_tbl = table(pid, EEG_dt, 'VariableNames', {'Patient','EEG_Date'});
+EEG_tbl = EEG_tbl(~isnat(EEG_tbl.EEG_Date), :);
 
-% Remove EEGs with unparseable dates
-EEG_dates = EEG_dates(~isnat(EEG_dates.EEG_Date), :);
+% ---- compute per-visit min gap ----
+GapTable = Vuniq(:, {'Patient','VisitDate'});
+GapTable.MinAbsGap_days = NaN(height(GapTable),1);
 
-%% ---- Join spike rates to EEG dates ----
-% SessionLevelSpikeRates has Patient, Session, SpikesPerHour
-EEG_tbl = innerjoin(...
-    EEG_dates, ...
-    SessionLevelSpikeRates(:, {'Patient','Session','SpikesPerHour'}), ...
-    'Keys', {'Patient','Session'});
+[gv, pidV] = findgroups(GapTable.Patient);
 
-%% ---- Join epilepsy type to visits ----
-% PatientTyping has Patient, EpiType3
-Vtyped = innerjoin(...
-    Vuniq(:, {'Patient','VisitDate','Freq_R1','HasSz'}), ...
-    PatientTyping(:, {'Patient','EpiType3'}), ...
-    'Keys', 'Patient');
+for k = 1:numel(pidV)
+    p = pidV(k);
+    idxV = find(gv == k);
 
-%% ---- Cross-join EEGs x Visits within each patient ----
-patients = unique(EEG_tbl.Patient);
-patients = intersect(patients, unique(Vtyped.Patient)); % only patients in both
+    eegDates = EEG_tbl.EEG_Date(EEG_tbl.Patient == p);
+    if isempty(eegDates)
+        continue
+    end
 
-nEstimate = 0; % preallocate estimate
-for i = 1:numel(patients)
-    p = patients(i);
-    nE = sum(EEG_tbl.Patient == p);
-    nV = sum(Vtyped.Patient == p);
-    nEstimate = nEstimate + nE * nV;
-end
-
-% Preallocate output arrays
-Patient_out      = nan(nEstimate, 1);
-Session_out      = nan(nEstimate, 1);
-VisitDate_out    = NaT(nEstimate, 1);
-SpikesPerHour_out = nan(nEstimate, 1);
-SzFreq_out       = nan(nEstimate, 1);
-HasSz_out        = nan(nEstimate, 1);
-SignedLag_out    = nan(nEstimate, 1);
-EpiType3_out     = strings(nEstimate, 1);
-
-row = 0;
-
-for i = 1:numel(patients)
-    p = patients(i);
-
-    % All EEGs for this patient
-    eeg_rows = EEG_tbl(EEG_tbl.Patient == p, :);
-    % All visits for this patient
-    vis_rows = Vtyped(Vtyped.Patient == p, :);
-
-    nE = height(eeg_rows);
-    nV = height(vis_rows);
-
-    % Cross join: all EEG x visit combinations
-    for e = 1:nE
-        for v = 1:nV
-            row = row + 1;
-
-            % Signed lag: positive = visit AFTER EEG, negative = visit BEFORE EEG
-            lag_days = days(vis_rows.VisitDate(v) - eeg_rows.EEG_Date(e));
-
-            Patient_out(row)       = p;
-            Session_out(row)       = eeg_rows.Session(e);
-            VisitDate_out(row)     = vis_rows.VisitDate(v);
-            SpikesPerHour_out(row) = eeg_rows.SpikesPerHour(e);
-            SzFreq_out(row)        = vis_rows.Freq_R1(v);
-            HasSz_out(row)         = vis_rows.HasSz(v);
-            SignedLag_out(row)     = lag_days;
-            EpiType3_out(row)      = string(vis_rows.EpiType3(v));
-        end
+    for j = idxV'
+        GapTable.MinAbsGap_days(j) = ...
+            min(abs(days(eegDates - GapTable.VisitDate(j))));
     end
 end
 
-% Trim to actual rows used
-Patient_out       = Patient_out(1:row);
-Session_out       = Session_out(1:row);
-VisitDate_out     = VisitDate_out(1:row);
-SpikesPerHour_out = SpikesPerHour_out(1:row);
-SzFreq_out        = SzFreq_out(1:row);
-HasSz_out         = HasSz_out(1:row);
-SignedLag_out     = SignedLag_out(1:row);
-EpiType3_out      = EpiType3_out(1:row);
-
-%% ---- Assemble output table ----
-PairTable = table(...
-    Patient_out, ...
-    Session_out, ...
-    VisitDate_out, ...
-    SpikesPerHour_out, ...
-    SzFreq_out, ...
-    HasSz_out, ...
-    SignedLag_out, ...
-    EpiType3_out, ...
-    'VariableNames', {...
-        'Patient', 'Session', 'VisitDate', ...
-        'SpikesPerHour', 'SzFreq', 'HasSz', ...
-        'SignedLag_days', 'EpiType3'});
-
-%% ---- Create globally unique EEG identifier ----
-PairTable.EEG_ID = categorical(...
-    string(PairTable.Patient) + "_" + string(PairTable.Session));
-
-%% ---- Remove rows with missing key variables ----
-keepMask = isfinite(PairTable.SpikesPerHour) & ...
-           isfinite(PairTable.SzFreq) & ...
-           isfinite(PairTable.SignedLag_days) & ...
-           strlength(PairTable.EpiType3) > 0;
-
-n_before = height(PairTable);
-PairTable = PairTable(keepMask, :);
-n_after  = height(PairTable);
-
-fprintf('[build_eeg_visit_pairs] %d patients, %d EEG-visit pairs (%d removed for missing data)\n', ...
-    numel(patients), n_after, n_before - n_after);
-
-%% ---- Normalize spike rate for model stability ----
-% Log-transform spike rate (adding small offset for zeros)
-EPS_SPIKE = 1e-3;
-PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE);
-
-% Scale signed lag to years (easier to interpret coefficients)
-PairTable.SignedLag_years = PairTable.SignedLag_days / 365.25;
-
-% Convert Patient to categorical for use as random effect grouping variable
-PairTable.PatientID = categorical(PairTable.Patient);
-
+GapTable.MinAbsGap_years = GapTable.MinAbsGap_days / 365.25;
 end
 
-function MixedModelResults = fit_mixed_effects_models(PairTable, nBoot, alpha)
-%% fit_mixed_effects_models
-% Fits linear and logistic mixed effects models for the association between
-% spike rate and seizure frequency/occurrence, with absolute time lag,
-% lag direction, and epilepsy subtype as fixed effects, and patient as
-% random effect.
+
+
+
+function V_f = restrict_visits_by_min_abs_gap(Vuniq, ReportForKeptSessions, minDays, maxDays)
+% Keep visits for which min |VisitDate - EEG_Date| across that patient's EEGs is in [minDays, maxDays].
 %
-% Inputs:
-%   PairTable : output of build_eeg_visit_pairs
-%   nBoot     : number of bootstrap iterations (0 to skip, 5000 for final)
-%   alpha     : significance level (e.g. 0.05)
-%
-% Output:
-%   MixedModelResults : struct with model objects, summary tables, and
-%                       bootstrap CIs
+% minDays can be 0, maxDays can be Inf
 
-if nargin < 2, nBoot = 0;    end
-if nargin < 3, alpha = 0.05; end
-
-%% ================================================================
-%% PREPARE MODEL TABLE
-%% ================================================================
-canonical3 = ["Frontal","General","Temporal"];
-
-keepMask = ismember(string(PairTable.EpiType3), canonical3) & ...
-           isfinite(PairTable.LogSpikesPerHour) & ...
-           isfinite(PairTable.SignedLag_years)  & ...
-           isfinite(PairTable.HasSz);
-
-T = PairTable(keepMask, :);
-
-% Epilepsy type: Temporal as reference (largest group)
-T.EpiType3_cat = categorical(string(T.EpiType3), canonical3);
-T.EpiType3_cat = reordercats(T.EpiType3_cat, ["Temporal","Frontal","General"]);
-
-% Binary outcome
-T.HasSz_bin = double(T.HasSz == 1);
-
-% Continuous outcome (log-transformed with epsilon offset)
-EPS_SZ      = 1e-3;
-T.LogSzFreq = log(T.SzFreq + EPS_SZ);
-
-% Absolute lag: proximity regardless of direction
-T.AbsLag_years = abs(T.SignedLag_years);
-
-% Direction: +1 if visit after EEG, -1 if before
-% Same-day visits treated as after (direction = +1)
-T.LagDirection                          = sign(T.SignedLag_years);
-T.LagDirection(T.SignedLag_years == 0)  = 1;
-
-% Report lag statistics
-n_after  = sum(T.LagDirection ==  1);
-n_before = sum(T.LagDirection == -1);
-fprintf('[Lag direction] After EEG: %d (%.1f%%), Before EEG: %d (%.1f%%)\n', ...
-    n_after,  100*n_after /height(T), ...
-    n_before, 100*n_before/height(T));
-fprintf('[Abs lag] Median %.2f years, IQR [%.2f, %.2f], range [%.2f, %.2f]\n', ...
-    median(T.AbsLag_years), ...
-    prctile(T.AbsLag_years, 25), ...
-    prctile(T.AbsLag_years, 75), ...
-    min(T.AbsLag_years), ...
-    max(T.AbsLag_years));
-fprintf('[fit_mixed_effects_models] Fitting on %d pairs, %d patients\n', ...
-    height(T), numel(unique(T.Patient)));
-
-%% ================================================================
-%% MODEL FORMULAS
-%% ================================================================
-
-% Model 1: Full model — proximity + direction interactions
-formula_logistic = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour * AbsLag_years + ' ...
-    'LogSpikesPerHour * LagDirection + ' ...
-    'EpiType3_cat + (1|PatientID)'];
-
-% Model 2: Linear sensitivity — same fixed effects as Model 1
-formula_linear = ['LogSzFreq ~ ' ...
-    'LogSpikesPerHour * AbsLag_years + ' ...
-    'LogSpikesPerHour * LagDirection + ' ...
-    'EpiType3_cat + (1|PatientID)'];
-
-% Model 3: No interactions (for LRT baseline)
-formula_logistic_noint = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour + AbsLag_years + LagDirection + ' ...
-    'EpiType3_cat + (1|PatientID)'];
-
-% Model 4: Proximity interaction only — PRIMARY MODEL
-formula_logistic_proxonly = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour * AbsLag_years + ' ...
-    'LagDirection + ' ...
-    'EpiType3_cat + (1|PatientID)'];
-
-%% ================================================================
-%% FIT MODEL 1: Logistic — proximity + direction interactions
-%% ================================================================
-fprintf('\nFitting Model 1: Logistic — proximity + direction interactions...\n');
-try
-    mdl_logistic = fitglme(T, formula_logistic, ...
-        'Distribution',      'Binomial', ...
-        'Link',              'logit', ...
-        'FitMethod',         'Laplace', ...
-        'CovariancePattern', 'Diagonal');
-    fprintf('Model 1 converged successfully.\n');
-    disp(mdl_logistic);
-catch ME
-    disp(['Model 1 failed: ' ME.message]);
-    mdl_logistic = [];
+needV = ["Patient","VisitDate","Freq_R1"];
+missV = setdiff(needV, string(Vuniq.Properties.VariableNames));
+if ~isempty(missV)
+    error("Vuniq missing required columns: %s", strjoin(missV,", "));
 end
 
-%% ================================================================
-%% FIT MODEL 2: Linear — proximity + direction interactions
-%% ================================================================
-fprintf('\nFitting Model 2: Linear — proximity + direction interactions...\n');
-try
-    mdl_linear = fitlme(T, formula_linear, ...
-        'FitMethod', 'REML');
-    fprintf('Model 2 converged successfully.\n');
-    disp(mdl_linear);
-catch ME
-    disp(['Model 2 failed: ' ME.message]);
-    mdl_linear = [];
-end
-
-%% ================================================================
-%% FIT MODEL 3: Logistic — main effects only (LRT baseline)
-%% ================================================================
-fprintf('\nFitting Model 3: Logistic — main effects only...\n');
-try
-    mdl_logistic_noint = fitglme(T, formula_logistic_noint, ...
-        'Distribution',      'Binomial', ...
-        'Link',              'logit', ...
-        'FitMethod',         'Laplace', ...
-        'CovariancePattern', 'Diagonal');
-    fprintf('Model 3 converged successfully.\n');
-    disp(mdl_logistic_noint);
-catch ME
-    disp(['Model 3 failed: ' ME.message]);
-    mdl_logistic_noint = [];
-end
-
-%% ================================================================
-%% FIT MODEL 4: Logistic — proximity interaction only (PRIMARY)
-%% ================================================================
-fprintf('\nFitting Model 4 (PRIMARY): Logistic — proximity interaction only...\n');
-try
-    mdl_logistic_proxonly = fitglme(T, formula_logistic_proxonly, ...
-        'Distribution',      'Binomial', ...
-        'Link',              'logit', ...
-        'FitMethod',         'Laplace', ...
-        'CovariancePattern', 'Diagonal');
-    fprintf('Model 4 converged successfully.\n');
-    disp(mdl_logistic_proxonly);
-catch ME
-    disp(['Model 4 failed: ' ME.message]);
-    mdl_logistic_proxonly = [];
-end
-
-%% ================================================================
-%% LIKELIHOOD RATIO TESTS
-%% ================================================================
-fprintf('\n========================================\n');
-fprintf('LIKELIHOOD RATIO TESTS\n');
-fprintf('========================================\n');
-
-% LRT 1: Both interactions vs no interactions
-if ~isempty(mdl_logistic) && ~isempty(mdl_logistic_noint)
-    fprintf('\nLRT 1: Both interactions vs no interactions\n');
-    lrt1 = compare(mdl_logistic_noint, mdl_logistic);
-    disp(lrt1);
-end
-
-% LRT 2: Both interactions vs proximity only (tests direction interaction)
-if ~isempty(mdl_logistic) && ~isempty(mdl_logistic_proxonly)
-    fprintf('\nLRT 2: Both interactions vs proximity interaction only\n');
-    lrt2 = compare(mdl_logistic_proxonly, mdl_logistic);
-    disp(lrt2);
-end
-
-% LRT 3: Proximity interaction vs no interactions (tests proximity interaction)
-if ~isempty(mdl_logistic_proxonly) && ~isempty(mdl_logistic_noint)
-    fprintf('\nLRT 3: Proximity interaction only vs no interactions\n');
-    lrt3 = compare(mdl_logistic_noint, mdl_logistic_proxonly);
-    disp(lrt3);
-end
-
-%% ================================================================
-%% FIXED EFFECTS SUMMARY — ALL MODELS
-%% ================================================================
-fprintf('\n========================================\n');
-fprintf('FIXED EFFECTS SUMMARY\n');
-fprintf('========================================\n');
-
-T_fe1 = []; T_fe2 = []; T_fe3 = []; T_fe4 = [];
-
-if ~isempty(mdl_logistic)
-    fprintf('\nModel 1 (Logistic, proximity + direction interactions):\n');
-    [beta, betanames, stats] = fixedEffects(mdl_logistic, 'Alpha', alpha);
-    T_fe1 = table(...
-        string(betanames.Name), beta, stats.SE, stats.tStat, stats.pValue, ...
-        exp(beta), exp(beta - 1.96*stats.SE), exp(beta + 1.96*stats.SE), ...
-        'VariableNames', {'Term','Beta','SE','t','p','OR','OR_lo','OR_hi'});
-    disp(T_fe1);
-end
-
-if ~isempty(mdl_linear)
-    fprintf('\nModel 2 (Linear, proximity + direction interactions):\n');
-    [beta2, betanames2, stats2] = fixedEffects(mdl_linear, 'Alpha', alpha);
-    T_fe2 = table(...
-        string(betanames2.Name), beta2, stats2.SE, stats2.tStat, stats2.pValue, ...
-        'VariableNames', {'Term','Beta','SE','t','p'});
-    disp(T_fe2);
-end
-
-if ~isempty(mdl_logistic_noint)
-    fprintf('\nModel 3 (Logistic, no interactions):\n');
-    [beta3, betanames3, stats3] = fixedEffects(mdl_logistic_noint, 'Alpha', alpha);
-    T_fe3 = table(...
-        string(betanames3.Name), beta3, stats3.SE, stats3.tStat, stats3.pValue, ...
-        exp(beta3), exp(beta3 - 1.96*stats3.SE), exp(beta3 + 1.96*stats3.SE), ...
-        'VariableNames', {'Term','Beta','SE','t','p','OR','OR_lo','OR_hi'});
-    disp(T_fe3);
-end
-
-if ~isempty(mdl_logistic_proxonly)
-    fprintf('\nModel 4 (PRIMARY — Logistic, proximity interaction only):\n');
-    [beta4, betanames4, stats4] = fixedEffects(mdl_logistic_proxonly, 'Alpha', alpha);
-    T_fe4 = table(...
-        string(betanames4.Name), beta4, stats4.SE, stats4.tStat, stats4.pValue, ...
-        exp(beta4), exp(beta4 - 1.96*stats4.SE), exp(beta4 + 1.96*stats4.SE), ...
-        'VariableNames', {'Term','Beta','SE','t','p','OR','OR_lo','OR_hi'});
-    disp(T_fe4);
-end
-
-%% ================================================================
-%% BOOTSTRAP CIs — MODEL 4 (PRIMARY)
-%% ================================================================
-T_boot4     = [];
-boot_betas4 = [];
-
-if ~isempty(mdl_logistic_proxonly) && nBoot > 0
-    fprintf('\nBootstrapping Model 4 (primary) CIs (%d iterations)...\n', nBoot);
-
-    patients    = unique(T.PatientID);
-    nPat        = numel(patients);
-    nFixed4     = size(fixedEffects(mdl_logistic_proxonly), 1);
-    boot_betas4 = nan(nBoot, nFixed4);
-
-    parfor b = 1:nBoot
-        idx      = randi(nPat, nPat, 1);
-        bootPats = patients(idx);
-
-        Tboot = cell(nPat, 1);
-        for k = 1:nPat
-            Tboot{k} = T(T.PatientID == bootPats(k), :);
-            Tboot{k}.PatientID = categorical(repmat(k, height(Tboot{k}), 1));
-        end
-        Tboot = vertcat(Tboot{:});
-
-        try
-            mboot = fitglme(Tboot, formula_logistic_proxonly, ...
-                'Distribution',      'Binomial', ...
-                'Link',              'logit', ...
-                'FitMethod',         'Laplace', ...
-                'CovariancePattern', 'Diagonal');
-            boot_betas4(b,:) = fixedEffects(mboot)';
-        catch
-            % leave as NaN — excluded below
-        end
-    end
-
-    % Remove failed iterations
-    converged4  = all(isfinite(boot_betas4), 2);
-    boot_betas4 = boot_betas4(converged4, :);
-    fprintf('Model 4 bootstrap: %d/%d iterations converged (%.1f%%)\n', ...
-        sum(converged4), nBoot, 100*mean(converged4));
-
-    ci_lo4 = prctile(boot_betas4, 100*(alpha/2),   1);
-    ci_hi4 = prctile(boot_betas4, 100*(1-alpha/2), 1);
-
-    [beta_obs4, betanames_obs4] = fixedEffects(mdl_logistic_proxonly);
-
-    T_boot4 = table(...
-        string(betanames_obs4.Name), ...
-        beta_obs4, ...
-        ci_lo4(:), ci_hi4(:), ...
-        exp(beta_obs4), exp(ci_lo4(:)), exp(ci_hi4(:)), ...
-        'VariableNames', {'Term','Beta','Boot_CI_lo','Boot_CI_hi', ...
-                          'OR','OR_CI_lo','OR_CI_hi'});
-
-    fprintf('\nModel 4 bootstrapped ORs and CIs:\n');
-    disp(T_boot4);
-end
-
-%% ================================================================
-%% BOOTSTRAP CIs — MODEL 1 (SUPPLEMENTAL)
-%% ================================================================
-T_boot1     = [];
-boot_betas1 = [];
-
-if ~isempty(mdl_logistic) && nBoot > 0
-    fprintf('\nBootstrapping Model 1 (supplemental) CIs (%d iterations)...\n', nBoot);
-
-    patients    = unique(T.PatientID);
-    nPat        = numel(patients);
-    nFixed1     = size(fixedEffects(mdl_logistic), 1);
-    boot_betas1 = nan(nBoot, nFixed1);
-
-    parfor b = 1:nBoot
-        idx      = randi(nPat, nPat, 1);
-        bootPats = patients(idx);
-
-        Tboot = cell(nPat, 1);
-        for k = 1:nPat
-            Tboot{k} = T(T.PatientID == bootPats(k), :);
-            Tboot{k}.PatientID = categorical(repmat(k, height(Tboot{k}), 1));
-        end
-        Tboot = vertcat(Tboot{:});
-
-        try
-            mboot = fitglme(Tboot, formula_logistic, ...
-                'Distribution',      'Binomial', ...
-                'Link',              'logit', ...
-                'FitMethod',         'Laplace', ...
-                'CovariancePattern', 'Diagonal');
-            boot_betas1(b,:) = fixedEffects(mboot)';
-        catch
-            % leave as NaN
-        end
-    end
-
-    converged1  = all(isfinite(boot_betas1), 2);
-    boot_betas1 = boot_betas1(converged1, :);
-    fprintf('Model 1 bootstrap: %d/%d iterations converged (%.1f%%)\n', ...
-        sum(converged1), nBoot, 100*mean(converged1));
-
-    ci_lo1 = prctile(boot_betas1, 100*(alpha/2),   1);
-    ci_hi1 = prctile(boot_betas1, 100*(1-alpha/2), 1);
-
-    [beta_obs1, betanames_obs1] = fixedEffects(mdl_logistic);
-
-    T_boot1 = table(...
-        string(betanames_obs1.Name), ...
-        beta_obs1, ...
-        ci_lo1(:), ci_hi1(:), ...
-        exp(beta_obs1), exp(ci_lo1(:)), exp(ci_hi1(:)), ...
-        'VariableNames', {'Term','Beta','Boot_CI_lo','Boot_CI_hi', ...
-                          'OR','OR_CI_lo','OR_CI_hi'});
-
-    fprintf('\nModel 1 bootstrapped ORs and CIs:\n');
-    disp(T_boot1);
-end
-
-%% ================================================================
-%% DIAGNOSTIC PLOTS FOR BOOTSTRAP DISTRIBUTIONS
-%% ================================================================
-if ~isempty(boot_betas4) && size(boot_betas4,1) > 10
-    [~, betanames_diag] = fixedEffects(mdl_logistic_proxonly);
-    term_names = string(betanames_diag.Name);
-    nTerms     = numel(term_names);
-
-    nCols = ceil(sqrt(nTerms));
-    nRows = ceil(nTerms / nCols);
-
-    figDiag = figure('Color','w', ...
-        'Position',[100 100 300*nCols 250*nRows], ...
-        'Name','Bootstrap distributions — Model 4');
-    tl_diag = tiledlayout(figDiag, nRows, nCols, ...
-        'TileSpacing','compact','Padding','loose');
-
-    [beta_diag, ~, stats_diag] = fixedEffects(mdl_logistic_proxonly);
-
-    for k = 1:nTerms
-        ax = nexttile(tl_diag);
-        histogram(ax, boot_betas4(:,k), 40, ...
-            'FaceColor',[0.2 0.5 0.8],'EdgeColor','none','FaceAlpha',0.7);
-        xline(ax, beta_diag(k), 'r-',  'LineWidth', 2);
-        xline(ax, prctile(boot_betas4(:,k), 2.5),  'k--', 'LineWidth', 1.5);
-        xline(ax, prctile(boot_betas4(:,k), 97.5), 'k--', 'LineWidth', 1.5);
-        title(ax, term_names(k), 'FontSize', 9, 'Interpreter','none');
-        xlabel(ax, '\beta', 'FontSize', 8);
-        box(ax,'off');
-    end
-
-    sgtitle(figDiag, 'Bootstrap distributions — Model 4 (red=observed, dashed=95% CI)', ...
-        'FontSize', 11);
-end
-
-%% ================================================================
-%% BUNDLE OUTPUT
-%% ================================================================
-MixedModelResults.ModelTable             = T;
-
-% Model objects
-MixedModelResults.mdl_logistic           = mdl_logistic;
-MixedModelResults.mdl_linear             = mdl_linear;
-MixedModelResults.mdl_logistic_noint     = mdl_logistic_noint;
-MixedModelResults.mdl_logistic_proxonly  = mdl_logistic_proxonly;
-
-% Fixed effects tables (Laplace CIs)
-MixedModelResults.FE_logistic            = T_fe1;
-MixedModelResults.FE_linear              = T_fe2;
-MixedModelResults.FE_logistic_noint      = T_fe3;
-MixedModelResults.FE_logistic_proxonly   = T_fe4;  % primary
-
-% Bootstrap results — Model 4 (primary)
-MixedModelResults.BootstrapBetas4        = boot_betas4;
-MixedModelResults.BootstrapTable4        = T_boot4;
-
-% Bootstrap results — Model 1 (supplemental)
-MixedModelResults.BootstrapBetas1        = boot_betas1;
-MixedModelResults.BootstrapTable1        = T_boot1;
-
-fprintf('\nDone. Primary model is Model 4 (mdl_logistic_proxonly).\n');
-if ~isempty(T_boot4)
-    fprintf('Bootstrap CIs available in MMR.BootstrapTable4\n');
+% Accept either Patient or patient_id
+if ismember("Patient", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.Patient);
+elseif ismember("patient_id", string(ReportForKeptSessions.Properties.VariableNames))
+    pid = double(ReportForKeptSessions.patient_id);
 else
-    fprintf('No bootstrap CIs computed (nBoot=0). Rerun with nBoot>0 for final results.\n');
+    error("ReportForKeptSessions must contain Patient or patient_id.");
 end
 
+if ~ismember("start_time_deid", string(ReportForKeptSessions.Properties.VariableNames))
+    error("ReportForKeptSessions missing start_time_deid.");
 end
 
-
-function [FigMain, FigCV] = make_figures_and_cv(MMR, Views, Vuniq, ...
-                                                  ReportForKeptSessions, ...
-                                                  canonical3, nFolds, ...
-                                                  outPath_main, outPath_cv)
-%% make_figures_and_cv
-% Creates:
-%   1. FigMain : Combined context + model figure (4 panels A-D)
-%   2. FigCV   : Cross-validated classifier figure (ROC + PR curves)
-%
-% Inputs:
-%   MMR                   : output of fit_mixed_effects_models
-%   Views                 : output of build_filtered_view
-%   Vuniq                 : visit-level table (Patient, VisitDate, HasSz, Freq_R1)
-%   ReportForKeptSessions : EEG report table (Patient, start_time_deid)
-%   canonical3            : string array e.g. ["Temporal","Frontal","General"]
-%   nFolds                : number of CV folds (e.g. 5)
-%   outPath_main          : output path for main figure
-%   outPath_cv            : output path for CV figure
-
-if nargin < 6, nFolds      = 5;  end
-if nargin < 7, outPath_main = ''; end
-if nargin < 8, outPath_cv   = ''; end
-
-FONT_SIZE = 20;
-T         = MMR.ModelTable;
-mdl       = MMR.mdl_logistic_proxonly;
-
-%% ================================================================
-%% FIGURE 1: COMBINED CONTEXT + MODEL (4 panels)
-%% A: EEG and visit timing
-%% B: Seizure occurrence over time
-%% C: EEG-visit lag distribution
-%% D: Forest plot
-%% ================================================================
-
-FigMain = figure('Color','w','Position',[60 60 1100 900]);
-tl = tiledlayout(FigMain, 2, 2, 'TileSpacing','compact', 'Padding','loose');
-
-%% ----- Parse EEG dates -----
+% Parse EEG datetimes
 EEG_raw = ReportForKeptSessions.start_time_deid;
 if isdatetime(EEG_raw)
     EEG_dt = EEG_raw;
 else
-    EEG_dt = datetime(strtrim(string(EEG_raw)), ...
-        'InputFormat', "yyyy-MM-dd'T'HH:mm:ss");
+    EEG_dt = datetime(strtrim(string(EEG_raw)), 'InputFormat',"yyyy-MM-dd'T'HH:mm:ss");
 end
 
-refDate   = datetime(2000, 1, 1);
-EEG_yrs   = days(EEG_dt - refDate) / 365.25;
-EEG_yrs   = EEG_yrs(isfinite(EEG_yrs));
-Visit_yrs = days(Vuniq.VisitDate - refDate) / 365.25;
-Visit_yrs = Visit_yrs(isfinite(Visit_yrs));
+okEEG = ~isnat(EEG_dt) & isfinite(pid);
+EEG_tbl = table(pid(okEEG), EEG_dt(okEEG), 'VariableNames', {'Patient','EEG_Date'});
+if isempty(EEG_tbl)
+    error("No valid EEG dates found (start_time_deid could not be parsed).");
+end
 
-%% ----- Panel A: EEG timing vs visit timing -----
-axA = nexttile(tl, 1);
-hold(axA,'on'); box(axA,'off'); grid(axA,'on');
+V_f = Vuniq;
+keep = false(height(V_f),1);
 
-bin_edges_t = 0:1:15;
+[gv, pidV] = findgroups(V_f.Patient);
 
-histogram(axA, EEG_yrs, bin_edges_t, ...
-    'FaceColor',[0.2 0.5 0.8],'FaceAlpha',0.6,'EdgeColor','none', ...
-    'Normalization','probability','DisplayName','EEG recordings');
-histogram(axA, Visit_yrs, bin_edges_t, ...
-    'FaceColor',[0.8 0.3 0.1],'FaceAlpha',0.6,'EdgeColor','none', ...
-    'Normalization','probability','DisplayName','Clinic visits');
+for k = 1:numel(pidV)
+    p = pidV(k);
+    idxV = find(gv == k);
+    vDates = V_f.VisitDate(idxV);
 
-med_eeg   = median(EEG_yrs,   'omitnan');
-med_visit = median(Visit_yrs, 'omitnan');
-yl = ylim(axA);
-
-xline(axA, med_eeg,   '--','Color',[0.2 0.5 0.8],'LineWidth',1.5, ...
-    'HandleVisibility','off');
-xline(axA, med_visit, '--','Color',[0.8 0.3 0.1],'LineWidth',1.5, ...
-    'HandleVisibility','off');
-
-text(axA, med_eeg+0.15,   yl(2)*0.90, sprintf('Median\n%.1fy', med_eeg), ...
-    'Color',[0.2 0.5 0.8],'FontSize',FONT_SIZE-6);
-text(axA, med_visit+0.15, yl(2)*0.72, sprintf('Median\n%.1fy', med_visit), ...
-    'Color',[0.8 0.3 0.1],'FontSize',FONT_SIZE-6);
-
-xlabel(axA, 'Years since first visit', 'FontSize', FONT_SIZE);
-ylabel(axA, 'Proportion',              'FontSize', FONT_SIZE);
-title(axA,  'A. EEG and visit timing', 'FontSize', FONT_SIZE, 'FontWeight','bold');
-legend(axA, 'Location','northeast',    'FontSize', FONT_SIZE-6);
-set(axA, 'FontSize', FONT_SIZE);
-
-%% ----- Panel B: Proportion of visits with HasSz == 1 over time -----
-axB = nexttile(tl, 2);
-hold(axB,'on'); box(axB,'off'); grid(axB,'on');
-
-cohort_patients = unique(T.Patient);
-V_cohort = Vuniq(ismember(Vuniq.Patient, cohort_patients) & ...
-                 (Vuniq.HasSz == 0 | Vuniq.HasSz == 1), :);
-V_cohort.YearsSinceFirst = days(V_cohort.VisitDate - refDate) / 365.25;
-
-bin_edges_sz   = 0:1:14;
-bin_centers_sz = bin_edges_sz(1:end-1) + 0.5;
-nBins_sz       = numel(bin_centers_sz);
-bin_prop_sz    = nan(nBins_sz, 1);
-bin_lo_sz      = nan(nBins_sz, 1);
-bin_hi_sz      = nan(nBins_sz, 1);
-bin_n_sz       = zeros(nBins_sz, 1);
-
-for b = 1:nBins_sz
-    mask = V_cohort.YearsSinceFirst >= bin_edges_sz(b) & ...
-           V_cohort.YearsSinceFirst <  bin_edges_sz(b+1);
-    vals = V_cohort.HasSz(mask);
-    vals = vals(isfinite(vals));
-    if numel(vals) >= 10
-        bin_prop_sz(b) = mean(vals);
-        bin_n_sz(b)    = numel(vals);
-        boot_p = nan(500,1);
-        for bb = 1:500
-            boot_p(bb) = mean(vals(randi(numel(vals), numel(vals), 1)));
-        end
-        bin_lo_sz(b) = prctile(boot_p, 2.5);
-        bin_hi_sz(b) = prctile(boot_p, 97.5);
+    eegDates = EEG_tbl.EEG_Date(EEG_tbl.Patient == p);
+    if isempty(eegDates)
+        continue
     end
-end
 
-validB = isfinite(bin_prop_sz);
-
-patch(axB, ...
-    [bin_centers_sz(validB), fliplr(bin_centers_sz(validB))], ...
-    [bin_lo_sz(validB)', fliplr(bin_hi_sz(validB)')], ...
-    [0.8 0.3 0.1], 'FaceAlpha', 0.2, 'EdgeColor', 'none');
-
-plot(axB, bin_centers_sz(validB), bin_prop_sz(validB), 'o-', ...
-    'Color',[0.8 0.3 0.1],'LineWidth',2, ...
-    'MarkerFaceColor',[0.8 0.3 0.1],'MarkerSize',6);
-
-for b = find(validB)'
-    scatter(axB, bin_centers_sz(b), bin_prop_sz(b), ...
-        bin_n_sz(b)/5, [0.8 0.3 0.1],'filled','MarkerFaceAlpha',0.25);
-end
-
-yline(axB, 0.5, 'k--', 'LineWidth', 1.2, ...
-    'Label','50%','LabelHorizontalAlignment','right', ...
-    'FontSize', FONT_SIZE-6);
-
-overall_prop = mean(V_cohort.HasSz);
-text(axB, 0.98, 0.95, sprintf('Overall: %.0f%%', 100*overall_prop), ...
-    'Units','normalized','HorizontalAlignment','right', ...
-    'FontSize',FONT_SIZE-6,'Color',[0.5 0.5 0.5]);
-
-ylim(axB, [0 1]);
-xlabel(axB, 'Years since first visit',             'FontSize', FONT_SIZE);
-ylabel(axB, 'Proportion of visits with seizures',  'FontSize', FONT_SIZE);
-title(axB,  'B. Seizure occurrence over time',     'FontSize', FONT_SIZE, 'FontWeight','bold');
-set(axB, 'FontSize', FONT_SIZE);
-
-%% ----- Panel C: Absolute lag distribution -----
-axC = nexttile(tl, 3);
-hold(axC,'on'); box(axC,'off'); grid(axC,'on');
-
-abs_lags = T.AbsLag_years;
-
-histogram(axC, abs_lags, 40, ...
-    'FaceColor',[0.3 0.3 0.3],'FaceAlpha',0.6,'EdgeColor','none', ...
-    'Normalization','probability');
-
-med_lag = median(abs_lags);
-q1_lag  = prctile(abs_lags, 25);
-q3_lag  = prctile(abs_lags, 75);
-yl      = ylim(axC);
-
-xline(axC, med_lag, 'k-',  'LineWidth', 2.0);
-xline(axC, q1_lag,  'k--', 'LineWidth', 1.5);
-xline(axC, q3_lag,  'k--', 'LineWidth', 1.5);
-
-text(axC, med_lag+0.1, yl(2)*0.93, sprintf('Median: %.1fy', med_lag), ...
-    'FontSize', FONT_SIZE-6);
-text(axC, q1_lag+0.1,  yl(2)*0.80, sprintf('Q1: %.1fy', q1_lag), ...
-    'FontSize', FONT_SIZE-6);
-text(axC, q3_lag+0.1,  yl(2)*0.67, sprintf('Q3: %.1fy', q3_lag), ...
-    'FontSize', FONT_SIZE-6);
-
-yl = ylim(axC);
-patch(axC, [0 1 1 0],[yl(1) yl(1) yl(2) yl(2)], ...
-    [0.2 0.6 0.2],'FaceAlpha',0.12,'EdgeColor','none');
-text(axC, 0.05, yl(2)*0.55, ...
-    sprintf('Within\n1 year\n(%.0f%%)', 100*mean(abs_lags<=1)), ...
-    'FontSize', FONT_SIZE-6, 'Color',[0.1 0.5 0.1]);
-
-xlabel(axC, 'Absolute EEG-visit gap (years)',    'FontSize', FONT_SIZE);
-ylabel(axC, 'Proportion of pairs',               'FontSize', FONT_SIZE);
-title(axC,  'C. EEG-visit temporal gap distribution', ...
-    'FontSize', FONT_SIZE, 'FontWeight','bold');
-set(axC, 'FontSize', FONT_SIZE);
-
-%% ----- Panel D: Forest plot -----
-axD = nexttile(tl, 4);
-hold(axD,'on'); box(axD,'off'); grid(axD,'on');
-
-% Use bootstrap CIs if available, otherwise Laplace
-[beta_m, betanames_m, stats_m] = fixedEffects(mdl);
-raw_names = string(betanames_m.Name);
-
-if ~isempty(MMR.BootstrapTable4)
-    BT       = MMR.BootstrapTable4;
-    ci_label = '95% Bootstrap CI';
-    OR_D     = nan(numel(raw_names), 1);
-    OR_lo_D  = nan(numel(raw_names), 1);
-    OR_hi_D  = nan(numel(raw_names), 1);
-    for k = 1:numel(raw_names)
-        bt_row = BT(string(BT.Term) == raw_names(k), :);
-        if ~isempty(bt_row)
-            OR_D(k)    = bt_row.OR;
-            OR_lo_D(k) = bt_row.OR_CI_lo;
-            OR_hi_D(k) = bt_row.OR_CI_hi;
-        else
-            OR_D(k)    = exp(beta_m(k));
-            OR_lo_D(k) = exp(beta_m(k) - 1.96*stats_m.SE(k));
-            OR_hi_D(k) = exp(beta_m(k) + 1.96*stats_m.SE(k));
-        end
+    minAbsGap = inf(numel(vDates),1);
+    for j = 1:numel(vDates)
+        minAbsGap(j) = min(abs(days(eegDates - vDates(j))));
     end
-else
-    OR_D     = exp(beta_m);
-    OR_lo_D  = exp(beta_m - 1.96*stats_m.SE);
-    OR_hi_D  = exp(beta_m + 1.96*stats_m.SE);
-    ci_label = '95% Laplace CI';
+
+    keep(idxV) = (minAbsGap >= minDays) & (minAbsGap <= maxDays);
 end
 
-% Clean display names
-disp_names = raw_names;
-disp_names(disp_names=="(Intercept)")                   = "Intercept";
-disp_names(disp_names=="LogSpikesPerHour")              = "Log spike rate";
-disp_names(disp_names=="AbsLag_years")                  = "Absolute lag (years)";
-disp_names(disp_names=="LagDirection")                  = "Direction (after vs before)";
-disp_names(disp_names=="EpiType3_cat_Frontal")          = "Frontal vs Temporal";
-disp_names(disp_names=="EpiType3_cat_General")          = "Generalized vs Temporal";
-disp_names(disp_names=="LogSpikesPerHour:AbsLag_years") = "Log spike rate \times Abs lag";
+fprintf('[Visit-EEG distance] Kept %d/%d visits with min|gap| in [%g, %g] days\n', ...
+    nnz(keep), height(Vuniq), minDays, maxDays);
 
-% Remove intercept
-isInt      = (disp_names == "Intercept");
-OR_D       = OR_D(~isInt);
-OR_lo_D    = OR_lo_D(~isInt);
-OR_hi_D    = OR_hi_D(~isInt);
-pvals_D    = stats_m.pValue(~isInt);
-disp_names = disp_names(~isInt);
-nTerms     = numel(OR_D);
-
-plot_order = nTerms:-1:1;
-
-for k = 1:nTerms
-    idx = plot_order(k);
-    col = [0.1 0.3 0.7];
-    if pvals_D(idx) >= 0.05
-        col = [0.6 0.6 0.6];
-    end
-    plot(axD, [OR_lo_D(idx), OR_hi_D(idx)], [k k], '-', ...
-        'Color', col, 'LineWidth', 2.5);
-    scatter(axD, OR_D(idx), k, 100, col, 'filled');
-
-    p = pvals_D(idx);
-    if p < 0.001
-        pstr = 'p<0.001';
-    elseif p < 0.05
-        pstr = sprintf('p=%.3f', p);
-    else
-        pstr = sprintf('p=%.2f', p);
-    end
-    text(axD, OR_hi_D(idx)+0.005, k, pstr, ...
-        'FontSize', FONT_SIZE-5, 'VerticalAlignment','middle');
+V_f = V_f(keep,:);
 end
 
-xline(axD, 1, 'k--', 'LineWidth', 1.5);
-set(axD, 'YTick', 1:nTerms, ...
-         'YTickLabel', disp_names(plot_order), ...
-         'FontSize', FONT_SIZE-4);
-xlabel(axD, sprintf('Odds Ratio (%s)', ci_label), 'FontSize', FONT_SIZE);
-title(axD,  'D. Mixed effects model', ...
-    'FontSize', FONT_SIZE, 'FontWeight','bold');
-all_ors = [OR_lo_D; OR_hi_D];
-xlim(axD, [max(0.4, prctile(all_ors,2)), min(2.0, prctile(all_ors,98))]);
-set(axD, 'FontSize', FONT_SIZE);
-
-%% Save main figure
-if strlength(string(outPath_main)) > 0
-    if ~exist(fileparts(outPath_main),'dir'), mkdir(fileparts(outPath_main)); end
-    exportgraphics(FigMain, outPath_main, 'Resolution', 300);
-    fprintf('Saved main figure: %s\n', outPath_main);
-end
-
-%% ================================================================
-%% FIGURE 2: CROSS-VALIDATED CLASSIFIER
-%% ================================================================
-
-fprintf('\nRunning %d-fold cross-validated classifier...\n', nFolds);
-
-T_cv = T(T.AbsLag_years <= 1, :);
-fprintf('CV dataset: %d pairs, %d patients\n', ...
-    height(T_cv), numel(unique(T_cv.Patient)));
-
-T_cv.isFrontal = double(string(T_cv.EpiType3) == "Frontal");
-T_cv.isGeneral = double(string(T_cv.EpiType3) == "General");
-
-patients_cv = unique(T_cv.Patient);
-nPats_cv    = numel(patients_cv);
-rng(42);
-shuf_idx    = randperm(nPats_cv);
-patients_cv = patients_cv(shuf_idx);
-fold_assign = mod(0:nPats_cv-1, nFolds) + 1;
-
-all_scores = [];
-all_labels = [];
-
-fpr_folds     = cell(nFolds,1);
-tpr_folds     = cell(nFolds,1);
-rec_folds     = cell(nFolds,1);
-prec_folds    = cell(nFolds,1);
-auc_roc_folds = nan(nFolds,1);
-auc_pr_folds  = nan(nFolds,1);
-
-for f = 1:nFolds
-    test_pats  = patients_cv(fold_assign == f);
-    train_pats = patients_cv(fold_assign ~= f);
-
-    T_train = T_cv(ismember(T_cv.Patient, train_pats), :);
-    T_test  = T_cv(ismember(T_cv.Patient, test_pats),  :);
-
-    mdl_cv = fitglm(T_train, ...
-        'HasSz_bin ~ LogSpikesPerHour + isFrontal + isGeneral', ...
-        'Distribution', 'Binomial', ...
-        'Link', 'logit');
-
-    scores = predict(mdl_cv, T_test);
-
-    all_scores = [all_scores; scores];
-    all_labels = [all_labels; T_test.HasSz_bin];
-
-    [fpr_f, tpr_f, ~, auc_f] = perfcurve(T_test.HasSz_bin, scores, 1);
-    fpr_folds{f}     = fpr_f;
-    tpr_folds{f}     = tpr_f;
-    auc_roc_folds(f) = auc_f;
-
-    [rec_f, prec_f, ~, auc_pr_f] = perfcurve(T_test.HasSz_bin, scores, 1, ...
-        'XCrit','reca','YCrit','prec');
-    rec_folds{f}    = rec_f;
-    prec_folds{f}   = prec_f;
-    auc_pr_folds(f) = auc_pr_f;
-
-    fprintf('  Fold %d: AUC-ROC=%.3f, AUC-PR=%.3f (N_test=%d)\n', ...
-        f, auc_f, auc_pr_f, height(T_test));
-end
-
-[fpr_all, tpr_all, ~, auc_roc_all] = perfcurve(all_labels, all_scores, 1);
-[rec_all, prec_all, ~, auc_pr_all] = perfcurve(all_labels, all_scores, 1, ...
-    'XCrit','reca','YCrit','prec');
-pr_chance = mean(all_labels == 1);
-
-fprintf('\nOverall AUC-ROC=%.3f (mean folds=%.3f +/- %.3f)\n', ...
-    auc_roc_all, mean(auc_roc_folds), std(auc_roc_folds));
-fprintf('Overall AUC-PR =%.3f (mean folds=%.3f +/- %.3f)\n', ...
-    auc_pr_all, mean(auc_pr_folds), std(auc_pr_folds));
-fprintf('Chance AUC-PR  =%.3f\n', pr_chance);
-
-FigCV    = figure('Color','w','Position',[100 100 1000 480]);
-tl2      = tiledlayout(FigCV, 1, 2, 'TileSpacing','compact','Padding','loose');
-fold_col = [0.75 0.75 0.75];
-mean_col = [0.1  0.3  0.7 ];
-
-axR = nexttile(tl2, 1);
-hold(axR,'on'); box(axR,'off'); grid(axR,'on');
-
-for f = 1:nFolds
-    plot(axR, fpr_folds{f}, tpr_folds{f}, '-', ...
-        'Color', fold_col, 'LineWidth', 1.0, 'HandleVisibility','off');
-end
-plot(axR, fpr_all, tpr_all, '-', ...
-    'Color', mean_col, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('Pooled AUC=%.3f', auc_roc_all));
-plot(axR, [0 1],[0 1], 'k--', 'LineWidth', 1.5, ...
-    'DisplayName', 'Chance (AUC=0.50)');
-text(axR, 0.55, 0.12, ...
-    sprintf('Fold AUCs: %.3f ± %.3f', mean(auc_roc_folds), std(auc_roc_folds)), ...
-    'FontSize', FONT_SIZE-6, 'Color', fold_col*0.6);
-xlabel(axR, 'False Positive Rate', 'FontSize', FONT_SIZE);
-ylabel(axR, 'True Positive Rate',  'FontSize', FONT_SIZE);
-title(axR,  'A. ROC Curve',        'FontSize', FONT_SIZE, 'FontWeight','bold');
-legend(axR, 'Location','southeast','FontSize', FONT_SIZE-6);
-xlim(axR,[0 1]); ylim(axR,[0 1]);
-set(axR, 'FontSize', FONT_SIZE);
-
-axP = nexttile(tl2, 2);
-hold(axP,'on'); box(axP,'off'); grid(axP,'on');
-
-for f = 1:nFolds
-    r  = rec_folds{f};
-    p  = prec_folds{f};
-    ok = isfinite(r) & isfinite(p);
-    plot(axP, r(ok), p(ok), '-', ...
-        'Color', fold_col, 'LineWidth', 1.0, 'HandleVisibility','off');
-end
-ok_all = isfinite(rec_all) & isfinite(prec_all);
-plot(axP, rec_all(ok_all), prec_all(ok_all), '-', ...
-    'Color', mean_col, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('Pooled AUC=%.3f', auc_pr_all));
-yline(axP, pr_chance, 'k--', 'LineWidth', 1.5, ...
-    'DisplayName', sprintf('Chance (%.2f)', pr_chance));
-text(axP, 0.05, 0.12, ...
-    sprintf('Fold AUCs: %.3f ± %.3f', mean(auc_pr_folds), std(auc_pr_folds)), ...
-    'FontSize', FONT_SIZE-6, 'Color', fold_col*0.6);
-xlabel(axP, 'Recall',    'FontSize', FONT_SIZE);
-ylabel(axP, 'Precision', 'FontSize', FONT_SIZE);
-title(axP,  'B. Precision-Recall Curve', 'FontSize', FONT_SIZE, 'FontWeight','bold');
-legend(axP, 'Location','northeast', 'FontSize', FONT_SIZE-6);
-xlim(axP,[0 1]); ylim(axP,[0 1]);
-set(axP, 'FontSize', FONT_SIZE);
-
-if strlength(string(outPath_cv)) > 0
-    if ~exist(fileparts(outPath_cv),'dir'), mkdir(fileparts(outPath_cv)); end
-    exportgraphics(FigCV, outPath_cv, 'Resolution', 300);
-    fprintf('Saved CV figure: %s\n', outPath_cv);
-end
-
-end
-
-%% ================================================================
-%% LOCAL HELPERS
-%% ================================================================
-
-function Tpred = build_pred_table(spike_grid, abs_lag, lag_dir, epi_type, canonical3)
-n = numel(spike_grid);
-Tpred = table(...
-    spike_grid, ...
-    repmat(abs_lag,  n, 1), ...
-    repmat(lag_dir,  n, 1), ...
-    repmat(categorical(epi_type, canonical3), n, 1), ...
-    categorical(ones(n,1)), ...
-    'VariableNames', {'LogSpikesPerHour','AbsLag_years','LagDirection', ...
-                      'EpiType3_cat','PatientID'});
-Tpred.EpiType3_cat = reordercats(Tpred.EpiType3_cat, canonical3);
-end
-
-
-function write_tableS1(MMR, outPath)
-%% write_tableS1
-% Writes a CSV of the full mixed effects model results for Table S1
+function NearFarStats = plot_delta_rho_histogram(Views, Vuniq, ReportForKeptSessions, ...
+                                                 nearQ, farQ, nBoot, alpha, outPng)
+% plot_delta_rho_histogram
+% Plot (top) distribution of min Visit–EEG gaps with tercile shading + quantile cutoffs,
+% and (bottom) bootstrap distribution of Δρ = ρ_near − ρ_far (Spearman),
+% with Δρ x-axis centered around 0.
 %
 % Inputs:
-%   MMR     : output of fit_mixed_effects_models
-%   outPath : output path for CSV (e.g. '../output/TableS1.csv')
+%   nearQ, farQ : quantiles in [0,1], e.g., 0.333 and 0.667
+%   nBoot       : bootstrap iterations (e.g., 5000)
+%   alpha       : CI alpha (e.g., 0.05)
+%   outPng      : output file path ("" or '' to skip saving)
+%
+% NOTE: This function DEFINES near/far by quantiles of MinAbsGap_days computed across
+%       visits in Vuniq.
 
-%% ---- Clean up term names for display ----
-function disp = clean_term(raw)
-    disp = raw;
-    disp = strrep(disp, '(Intercept)',                   'Intercept');
-    disp = strrep(disp, 'LogSpikesPerHour:AbsLag_years', 'Log spike rate × Absolute lag');
-    disp = strrep(disp, 'LogSpikesPerHour:LagDirection', 'Log spike rate × Lag direction');
-    disp = strrep(disp, 'LogSpikesPerHour',              'Log spike rate');
-    disp = strrep(disp, 'AbsLag_years',                  'Absolute lag (years)');
-    disp = strrep(disp, 'LagDirection',                  'Lag direction (after vs before)');
-    disp = strrep(disp, 'EpiType3_cat_Frontal',          'Frontal vs Temporal epilepsy');
-    disp = strrep(disp, 'EpiType3_cat_General',          'Generalized vs Temporal epilepsy');
+% ------------------ Base cohort patients (match main Spearman cohort) ------------------
+basePatients = unique(double(Views.PatientSpikeSz_All.Patient));
+
+SpikeTbl = Views.PatientLevelSpikeRates(:, {'Patient','MeanSpikeRate_perHour'});
+SpikeTbl.Patient = double(SpikeTbl.Patient);
+SpikeTbl = innerjoin(SpikeTbl, table(basePatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+
+% ------------------ Clinic visit counts per patient (non-NaN seizure freq) ------------------
+V_base = innerjoin(Vuniq, ...
+    table(basePatients,'VariableNames',{'Patient'}), ...
+    'Keys','Patient');
+
+% only visits with documented seizure frequency (including has Sz == 0)
+V_base = V_base(isfinite(V_base.Freq_R1), :);
+
+[gpV, pidV] = findgroups(V_base.Patient);
+nVisitsPerPatient = splitapply(@numel, V_base.Freq_R1, gpV);
+
+nPatients_total = numel(pidV);
+nPatients_multi = nnz(nVisitsPerPatient >= 2);
+pct_multi = 100 * nPatients_multi / max(1, nPatients_total);
+
+fprintf(['[Visit counts] Patients with ≥2 clinic visits with documented seizure frequency: ' ...
+         '%d/%d (%.1f%%)\n'], ...
+         nPatients_multi, nPatients_total, pct_multi);
+
+
+% ------------------ Get stats on num pts with multiple EEGs ---------
+% Count EEGs per patient (each row is a patient-session EEG)
+pid = double(ReportForKeptSessions.Patient);   % or patient_id if that's what you have
+ses = double(ReportForKeptSessions.Session);   % or session_number
+
+% count unique sessions per patient
+[gp, pids] = findgroups(pid);
+nEEG = splitapply(@(x) numel(unique(x)), ses, gp);
+
+nPatients = numel(pids);
+nMulti    = nnz(nEEG >= 2);
+fprintf('Patients with >=2 EEGs: %d/%d (%.1f%%)\n', nMulti, nPatients, 100*nMulti/max(1,nPatients));
+
+
+% ------------------ Compute min gaps for ALL visits ------------------
+GapTable = compute_visit_eeg_gaps(Vuniq, ReportForKeptSessions);
+gaps = double(GapTable.MinAbsGap_days);
+gaps = gaps(isfinite(gaps));
+
+if isempty(gaps)
+    error("No finite MinAbsGap_days found.");
 end
 
-%% ---- Determine CI source ----
-use_bootstrap4 = ~isempty(MMR.BootstrapTable4);
-use_bootstrap1 = ~isempty(MMR.BootstrapTable1);
+nearDays = quantile(gaps, nearQ);
+farDays  = quantile(gaps, farQ);
 
-%% ---- Build rows for each model ----
-rows = {};
+% ------------------ Build NEAR/FAR visit subsets ------------------
+V_near = restrict_visits_by_min_abs_gap(Vuniq, ReportForKeptSessions, 0, nearDays);
+V_far  = restrict_visits_by_min_abs_gap(Vuniq, ReportForKeptSessions, farDays, Inf);
 
-%% Model 4 (Primary logistic)
-if ~isempty(MMR.FE_logistic_proxonly)
-    FE = MMR.FE_logistic_proxonly;
-    if use_bootstrap4
-        BT = MMR.BootstrapTable4;
-    end
+% ------------------ Patients with BOTH near and far visits ------------------
+% restrict to base cohort (same patients used downstream)
+Vn = innerjoin(V_near, table(basePatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+Vf = innerjoin(V_far,  table(basePatients,'VariableNames',{'Patient'}), 'Keys','Patient');
 
-    for i = 1:height(FE)
-        term = string(FE.Term(i));
-        if term == "(Intercept)", continue; end % skip intercept
+% require documented seizure frequency
+Vn = Vn(isfinite(Vn.Freq_R1), :);
+Vf = Vf(isfinite(Vf.Freq_R1), :);
 
-        or_pt  = FE.OR(i);
-        p_val  = FE.p(i);
+pNear = unique(Vn.Patient);
+pFar  = unique(Vf.Patient);
 
-        if use_bootstrap4
-            bt_row = BT(string(BT.Term) == term, :);
-            if ~isempty(bt_row)
-                ci_lo = bt_row.OR_CI_lo;
-                ci_hi = bt_row.OR_CI_hi;
-                ci_src = 'Bootstrap';
-            else
-                ci_lo = FE.OR_lo(i);
-                ci_hi = FE.OR_hi(i);
-                ci_src = 'Laplace';
-            end
-        else
-            ci_lo = FE.OR_lo(i);
-            ci_hi = FE.OR_hi(i);
-            ci_src = 'Laplace';
-        end
+pBoth = intersect(pNear, pFar);
 
-        % Format p-value
-        if p_val < 0.001
-            p_str = '<0.001';
-        elseif p_val < 0.01
-            p_str = sprintf('%.3f', p_val);
-        else
-            p_str = sprintf('%.2f', p_val);
-        end
+nTotal = numel(basePatients);
+nBoth  = numel(pBoth);
+pctBoth = 100 * nBoth / max(1, nTotal);
 
-        rows(end+1,:) = { ...
-            'Model 4 (Primary: logistic, HasSz outcome)', ...
-            clean_term(char(term)), ...
-            sprintf('%.3f', or_pt), ...
-            sprintf('%.3f', ci_lo), ...
-            sprintf('%.3f', ci_hi), ...
-            ci_src, ...
-            p_str ...
-        }; %#ok<AGROW>
-    end
+fprintf(['[Near/Far eligibility] Patients with ≥1 short-gap AND ≥1 long-gap visit ' ...
+         '(documented seizure freq): %d/%d (%.1f%%)\n'], ...
+         nBoth, nTotal, pctBoth);
+
+
+% This takes the mean of visits in V_near to get Sz_near, and same for
+% Sz_far
+Sz_near = build_patient_seizure_metrics(V_near);  % Patient, MeanSzFreq, ...
+Sz_far  = build_patient_seizure_metrics(V_far);
+
+% Rename BEFORE join so names are guaranteed
+Sz_near2 = Sz_near(:, {'Patient','MeanSzFreq'});
+Sz_far2  = Sz_far(:,  {'Patient','MeanSzFreq'});
+
+Sz_near2 = renamevars(Sz_near2, "MeanSzFreq", "MeanSzFreq_near");
+Sz_far2  = renamevars(Sz_far2,  "MeanSzFreq", "MeanSzFreq_far");
+
+% Join to spikes, require both near and far seizure metrics
+J_near = innerjoin(SpikeTbl, Sz_near2, 'Keys','Patient');
+J_far  = innerjoin(SpikeTbl, Sz_far2,  'Keys','Patient');
+J = innerjoin(J_near, J_far(:,{'Patient','MeanSzFreq_far'}), 'Keys','Patient');
+
+% Finite mask
+mask = isfinite(J.MeanSpikeRate_perHour) & isfinite(J.MeanSzFreq_near) & isfinite(J.MeanSzFreq_far);
+J = J(mask,:);
+
+n = height(J);
+if n < 3
+    error("Not enough patients with BOTH near and far seizure metrics (n=%d).", n);
 end
 
-%% Model 1 (Full logistic — supplemental)
-if ~isempty(MMR.FE_logistic)
-    FE = MMR.FE_logistic;
-    if use_bootstrap1
-        BT = MMR.BootstrapTable1;
-    end
+% Spikes, sz frequency for near visits, seizure frequency for far visits
+x  = double(J.MeanSpikeRate_perHour);
+yN = double(J.MeanSzFreq_near);
+yF = double(J.MeanSzFreq_far);
 
-    for i = 1:height(FE)
-        term = string(FE.Term(i));
-        if term == "(Intercept)", continue; end
+%% Are long gap visits later than short gap visits?
+% ===== Prep (cohort + documented freq only) =====
+Vn = innerjoin(V_near, table(basePatients,'VariableNames',{'Patient'}), 'Keys','Patient');
+Vf = innerjoin(V_far,  table(basePatients,'VariableNames',{'Patient'}), 'Keys','Patient');
 
-        or_pt = FE.OR(i);
-        p_val = FE.p(i);
+Vn = Vn(isfinite(Vn.Freq_R1), :);
+Vf = Vf(isfinite(Vf.Freq_R1), :);
 
-        if use_bootstrap1
-            bt_row = BT(string(BT.Term) == term, :);
-            if ~isempty(bt_row)
-                ci_lo = bt_row.OR_CI_lo;
-                ci_hi = bt_row.OR_CI_hi;
-                ci_src = 'Bootstrap';
-            else
-                ci_lo = FE.OR_lo(i);
-                ci_hi = FE.OR_hi(i);
-                ci_src = 'Laplace';
-            end
-        else
-            ci_lo = FE.OR_lo(i);
-            ci_hi = FE.OR_hi(i);
-            ci_src = 'Laplace';
-        end
+pBoth = intersect(unique(Vn.Patient), unique(Vf.Patient));
 
-        if p_val < 0.001
-            p_str = '<0.001';
-        elseif p_val < 0.01
-            p_str = sprintf('%.3f', p_val);
-        else
-            p_str = sprintf('%.2f', p_val);
-        end
+VnB = innerjoin(Vn, table(pBoth,'VariableNames',{'Patient'}), 'Keys','Patient');
+VfB = innerjoin(Vf, table(pBoth,'VariableNames',{'Patient'}), 'Keys','Patient');
 
-        rows(end+1,:) = { ...
-            'Model 1 (Full logistic: proximity + direction interactions)', ...
-            clean_term(char(term)), ...
-            sprintf('%.3f', or_pt), ...
-            sprintf('%.3f', ci_lo), ...
-            sprintf('%.3f', ci_hi), ...
-            ci_src, ...
-            p_str ...
-        }; %#ok<AGROW>
-    end
+% ===== For each patient: median visit date in near vs far =====
+[gn, pN] = findgroups(VnB.Patient);
+nearDate_med = splitapply(@median, VnB.VisitDate, gn);
+
+[gf, pF] = findgroups(VfB.Patient);
+farDate_med  = splitapply(@median, VfB.VisitDate, gf);
+
+% align rows by Patient (robust)
+Tdate = innerjoin( ...
+    table(double(pN), nearDate_med, 'VariableNames',{'Patient','NearDateMed'}), ...
+    table(double(pF), farDate_med,  'VariableNames',{'Patient','FarDateMed'}), ...
+    'Keys','Patient');
+
+deltaDays = days(Tdate.FarDateMed - Tdate.NearDateMed);   % >0 means far is later
+
+% Paired sign-rank test on within-patient date differences
+if height(Tdate) >= 3
+    p_time = signrank(deltaDays, 0, 'method','approx');  % H0: median delta = 0
+else
+    p_time = NaN;
 end
 
-%% Model 2 (Linear sensitivity)
-if ~isempty(MMR.FE_linear)
-    FE = MMR.FE_linear;
+fprintf(['[Chronology] Patients with both near+far: N=%d\n' ...
+         '  Median(FarDateMed - NearDateMed) = %.1f days (IQR %.1f–%.1f), signrank p=%s\n'], ...
+         height(Tdate), ...
+         median(deltaDays,'omitnan'), prctile(deltaDays,25), prctile(deltaDays,75), ...
+         p_label(p_time));
 
-    for i = 1:height(FE)
-        term = string(FE.Term(i));
-        if term == "(Intercept)", continue; end
+%% Do near visits have higher seizure frequencies
+% ===== For each patient: mean seizure freq in near vs far (documented only) =====
+nearFreq_mean = splitapply(@(x) mean(x,'omitnan'), VnB.Freq_R1, gn);
+farFreq_mean  = splitapply(@(x) mean(x,'omitnan'), VfB.Freq_R1, gf);
 
-        beta_pt = FE.Beta(i);
-        p_val   = FE.p(i);
-        se      = FE.SE(i);
-        ci_lo   = beta_pt - 1.96*se;
-        ci_hi   = beta_pt + 1.96*se;
+Tfreq = innerjoin( ...
+    table(double(pN), nearFreq_mean, 'VariableNames',{'Patient','NearMeanSz'}), ...
+    table(double(pF),  farFreq_mean, 'VariableNames',{'Patient','FarMeanSz'}), ...
+    'Keys','Patient');
 
-        if p_val < 0.001
-            p_str = '<0.001';
-        elseif p_val < 0.01
-            p_str = sprintf('%.3f', p_val);
-        else
-            p_str = sprintf('%.2f', p_val);
-        end
-
-        rows(end+1,:) = { ...
-            'Model 2 (Sensitivity: linear, log seizure frequency outcome)', ...
-            clean_term(char(term)), ...
-            sprintf('%.3f', beta_pt), ...
-            sprintf('%.3f', ci_lo), ...
-            sprintf('%.3f', ci_hi), ...
-            'Laplace', ...
-            p_str ...
-        }; %#ok<AGROW>
-    end
+% Paired sign-rank test: Far vs Near
+deltaFreq = Tfreq.NearMeanSz - Tfreq.FarMeanSz;  % positive => near higher
+if height(Tfreq) >= 3
+    p_sz = signrank(Tfreq.NearMeanSz, Tfreq.FarMeanSz, 'method','approx');
+else
+    p_sz = NaN;
 end
 
-%% ---- Assemble and write table ----
-T_out = cell2table(rows, ...
-    'VariableNames', { ...
-        'Model', ...
-        'Term', ...
-        'Estimate', ...
-        'CI_lower', ...
-        'CI_upper', ...
-        'CI_method', ...
-        'p_value' ...
-    });
+fprintf(['[Seizure freq] Patients with both near+far: N=%d\n' ...
+         '  NearMeanSz median=%.2f, FarMeanSz median=%.2f; ' ...
+         'median(Near-Far)=%.2f, signrank p=%s\n'], ...
+         height(Tfreq), ...
+         median(Tfreq.NearMeanSz,'omitnan'), ...
+         median(Tfreq.FarMeanSz,'omitnan'), ...
+         median(deltaFreq,'omitnan'), ...
+         p_label(p_sz));
 
-% Add note about what Estimate means per model
-fprintf('Table S1: %d rows written\n', height(T_out));
-fprintf('  Models 4 and 1: Estimate = Odds Ratio\n');
-fprintf('  Model 2: Estimate = Beta coefficient (log scale)\n');
+%% Main analysis
+% ------------------ Observed correlations ------------------
+rho_near = corr(x, yN, 'Type','Spearman', 'Rows','complete');
+rho_far  = corr(x, yF, 'Type','Spearman', 'Rows','complete');
+delta_obs = rho_near - rho_far;
 
-if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
-writetable(T_out, outPath);
-fprintf('Wrote Table S1: %s\n', outPath);
+% ------------------ Patient-level bootstrap ------------------
+delta = nan(nBoot,1);
+for b = 1:nBoot
+    idx = randi(n, n, 1); % resample patients
+    rn = corr(x(idx), yN(idx), 'Type','Spearman', 'Rows','complete');
+    rf = corr(x(idx), yF(idx), 'Type','Spearman', 'Rows','complete');
+    delta(b) = rn - rf;
+end
+
+ci_lo = prctile(delta, 100*(alpha/2));
+ci_hi = prctile(delta, 100*(1-alpha/2));
+delta_med = median(delta,'omitnan');
+
+p_one = mean(delta <= 0);                           % H1: near > far
+p_two = 2*min(mean(delta <= 0), mean(delta >= 0));  % two-sided bootstrap p
+
+% ------------------ Plot: gaps (top) + delta rho (bottom) ------------------
+
+fig = figure('Color','w','Position',[120 80 950 780]);
+tl = tiledlayout(fig, 2, 1, 'TileSpacing','compact', 'Padding','compact');
+
+% ===================== TOP: Gap distribution + tercile shading =====================
+ax1 = nexttile(tl,1); hold(ax1,'on'); box(ax1,'off'); grid(ax1,'on');
+
+% Histogram first so y-lims are defined
+hG = histogram(ax1, gaps, 60, 'EdgeColor','none');
+
+xlabel(ax1, '|Visit - EEG| gap (days)','fontsize',20);
+ylabel(ax1, 'Visit count','fontsize',20);
+
+% Determine x-range for shading
+xL = min(hG.BinEdges);
+xU = max(hG.BinEdges);
+
+% Clamp cutoffs to plotting range
+nearX = max(min(nearDays, xU), xL);
+farX  = max(min(farDays,  xU), xL);
+
+% Use current y-limits
+yl = get(ax1,'YLim');
+yl_new = [yl(1) yl(1) + 1.3*(yl(2)-yl(1))];
+set(ax1,'YLim', yl_new);
+
+% Helper for shaded region [xa, xb]
+makeShade = @(xa, xb, a) patch(ax1, ...
+    [xa xb xb xa], [yl(1) yl(1) yl(2) yl(2)], ...
+    [0 0 0], 'FaceAlpha', a, 'EdgeColor','none');
+
+% Shade: Near / Middle / Far (slightly stronger on near/far)
+pNear   = makeShade(xL,   nearX, 0.12);
+pMiddle = makeShade(nearX, farX, 0.06);
+pFar    = makeShade(farX,  xU,   0.12);
+
+% Put shading behind bars
+uistack([pNear pMiddle pFar], 'bottom');
+uistack(hG, 'top');
+
+% Cutoff lines
+xline(ax1, nearDays, 'k--', 'LineWidth',2);
+xline(ax1, farDays,  'k--', 'LineWidth',2);
+
+% Title 
+title(ax1, 'A. Visit–EEG gap distribution with lower and upper third cutoffs', ...
+    'FontSize', 20, 'Interpreter','none');
+
+% Region labels 
+yl = get(ax1,'YLim');
+yText = yl(2) * 0.99;
+
+text(ax1, mean([xL nearX]), yText, sprintf("Short gap\n(lower third)"), ...
+    'HorizontalAlignment','center', 'VerticalAlignment','top', ...
+    'FontSize',20, 'Interpreter','tex');
+
+text(ax1, mean([farX xU]), yText, sprintf("Long gap\n(upper third)"), ...
+    'HorizontalAlignment','center', 'VerticalAlignment','top', ...
+    'FontSize',20, 'Interpreter','tex');
+
+
+% ===================== BOTTOM: Δρ distribution (centered at 0) =====================
+ax2 = nexttile(tl,2); hold(ax2,'on'); box(ax2,'off'); grid(ax2,'on');
+
+histogram(ax2, delta, 40, 'EdgeColor','none');
+xline(ax2, 0,         'k--', 'LineWidth',2);
+xline(ax2, delta_med, 'k-',  'LineWidth',2);
+%xline(ax2, ci_lo,     'k:',  'LineWidth',2);
+%xline(ax2, ci_hi,     'k:',  'LineWidth',2);
+
+% symmetric x-lims around 0 (robust even if delta all positive)
+maxAbs = max(abs(delta));
+if ~isfinite(maxAbs) || maxAbs==0, maxAbs = 1e-3; end
+pad = 0.08 * maxAbs;
+xlim(ax2, [-maxAbs-pad, maxAbs+pad]);
+
+xlabel(ax2, '\Delta\rho = \rho_{short gap} - \rho_{long gap}');
+ylabel(ax2, 'Bootstrap count');
+
+% Title text WITH interpreter explicitly set to avoid warnings
+t2 = sprintf(['B. Distribution of differences in spike-seizure correlation\nbetween short and long visit-EEG gaps\n' ...
+              '95%% CI [%.3f, %.3f], p = %.3g'], ...
+              ci_lo, ci_hi, p_one);
+
+title(ax2, t2, 'FontSize', 20, 'Interpreter','tex');
+
+set([ax1 ax2],'FontSize',20);
+
+if strlength(string(outPng)) > 0
+    if ~exist(fileparts(outPng),'dir'), mkdir(fileparts(outPng)); end
+    exportgraphics(fig, outPng, 'Resolution', 300);
+end
+
+fprintf(['\nFig S3 analysis:\n'...
+    'N patients: %d\n'...
+    'Median rho short gap: %1.2f\n'...
+    'Median rho long gap: %1.2f\n'...
+    'Median [95%% CI] difference in rho: %1.3f [%1.2f-%1.2f]\n'...
+    'p = %1.4f.\n'],...
+    n,rho_near,rho_far,delta_obs,ci_lo,ci_hi,p_one);
+
+% ------------------ Bundle output ------------------
+NearFarStats = struct();
+NearFarStats.nPatients = n;
+
+NearFarStats.nearQ = nearQ;
+NearFarStats.farQ  = farQ;
+NearFarStats.nearDays = nearDays;
+NearFarStats.farDays  = farDays;
+
+NearFarStats.rho_near = rho_near;
+NearFarStats.rho_far  = rho_far;
+NearFarStats.delta_obs = delta_obs;
+
+NearFarStats.delta_boot = delta;
+NearFarStats.delta_median = delta_med;
+NearFarStats.delta_ci_lo = ci_lo;
+NearFarStats.delta_ci_hi = ci_hi;
+
+NearFarStats.p_one_sided = p_one;
+NearFarStats.p_two_sided = p_two;
+
+NearFarStats.tableUsed = J;
+NearFarStats.gapsUsed = gaps;
 
 end
+
+%% Sex analysis not used in the manuscript
+function [fS4, SexStats] = make_figS4_spike_by_sex(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha)
+% make_figS4_spike_by_sex
+% Plot patient-level mean spike rate (spikes/hour) for women vs men WITH EPILEPSY
+% and compare with Wilcoxon rank-sum test.
+
+PL = Views.PatientLevelSpikeRates;
+
+% Restrict to epilepsy patients using the mask aligned to PL rows
+if ~isfield(Views, 'IsEpilepsyMask')
+    error('Views is missing IsEpilepsyMask.');
+end
+PL_epi = PL(Views.IsEpilepsyMask, :);
+
+% Pull sex per patient from report (first nonmissing nlp_gender)
+Rk = Views.ReportForKeptSessions;
+require_cols(Rk, ["Patient","nlp_gender"], "ReportForKeptSessions");
+
+sex_raw = upper(strtrim(string(Rk.nlp_gender)));
+[gs, pidS] = findgroups(double(Rk.Patient));
+sex_per = splitapply(@local_first_nonmissing, sex_raw, gs);
+
+SexPerPatient = table(double(pidS), sex_per, 'VariableNames', {'Patient','SexCode'});
+
+% Join to epilepsy cohort
+T = innerjoin(PL_epi(:, {'Patient','MeanSpikeRate_perHour'}), SexPerPatient, 'Keys','Patient');
+
+% Keep only M/F
+isF = (T.SexCode == "F");
+isM = (T.SexCode == "M");
+T = T(isF | isM, :);
+
+xF = T.MeanSpikeRate_perHour(T.SexCode=="F");
+xM = T.MeanSpikeRate_perHour(T.SexCode=="M");
+
+xF = xF(isfinite(xF));
+xM = xM(isfinite(xM));
+
+nF = numel(xF);
+nM = numel(xM);
+
+% Rank-sum test (if enough data)
+if nF >= 3 && nM >= 3
+    p = ranksum(xF, xM, 'method','approx');
+else
+    p = NaN;
+end
+
+% Effect size (Cliff's delta; optional but often useful)
+d = cliff_delta(xF, xM);
+
+% Bootstrap medians + CI
+[medF, loF, hiF] = bootstrap_median_ci(xF, nBoot, alpha);
+[medM, loM, hiM] = bootstrap_median_ci(xM, nBoot, alpha);
+
+% Log plotting values (same convention as Fig 1)
+Y = to_log10_per_hour([xF; xM], EPS_RATE);
+Y = add_y_jitter_eps(Y, Y_ZERO, Y_LIMS, 0.02);
+G = categorical( ...
+    [repmat("Women", nF, 1); repmat("Men", nM, 1)], ...
+    ["Men","Women"], ...      % <-- explicit axis order
+    'Ordinal', true);
+
+% ---- draw ----
+fS4 = figure('Color','w','Position',[110 110 800 520]);
+ax = axes(fS4); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+
+boxchart(ax, categorical(G), Y, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
+swarmchart(ax, categorical(G), Y, 18, 'filled','MarkerFaceAlpha',0.18);
+
+yline(ax, Y_ZERO, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+ylim(ax, Y_LIMS);
+ylabel(ax,'Spikes/hour (log scale)');
+set_log10_ticks(ax,'y',EPS_RATE,Y_LIMS);
+
+% Median + CI overlays (men at x=1, wommen at x=2)
+add_median_ci_overlay(ax, 1, medM, loM, hiM, EPS_RATE);
+add_median_ci_overlay(ax, 2, medF, loF, hiF, EPS_RATE);
+
+% Significance bar
+yl = ylim(ax);
+yMaxData = max(Y(isfinite(Y)));
+yBar = yMaxData + 0.06*range(yl);
+yNeedTop = yBar + 0.10*range(yl);
+if yNeedTop > yl(2)
+    ylim(ax, [yl(1) yNeedTop]);
+    yl = ylim(ax);
+    yBar = yMaxData + 0.06*range(yl);
+end
+add_sigbar(ax, 1, 2, yBar, p_label(p));
+
+t = title(ax, 'Spike rate by sex (epilepsy only)');
+t.Units='normalized';
+t.Position(2) = t.Position(2) + TITLE_Y_OFFSET;
+
+set(ax,'FontSize',20);
+
+% Add Ns in labels
+labels = string(ax.XTickLabel);
+labels(labels=="Women") = sprintf('Women (N=%d)', nF);
+labels(labels=="Men")   = sprintf('Men (N=%d)', nM);
+ax.XTickLabel = labels;
+ax.XTickLabelRotation = 20;
+
+% ---- stats bundle ----
+SexStats = struct();
+SexStats.nWomen = nF;
+SexStats.nMen   = nM;
+SexStats.p_rankSum = p;
+SexStats.cliffs_delta = d;
+SexStats.medWomen = medF; SexStats.loWomen = loF; SexStats.hiWomen = hiF;
+SexStats.medMen   = medM; SexStats.loMen   = loM; SexStats.hiMen   = hiM;
+
+% Optional command-window printout (nice for legends)
+fprintf(['\nSex analysis (epilepsy only):\n' ...
+    'Women: median [95%% CI] = %.2f [%.2f-%.2f] spikes/hour (N=%d)\n' ...
+    'Men:   median [95%% CI] = %.2f [%.2f-%.2f] spikes/hour (N=%d)\n' ...
+    '%s, Cliff''s δ = %.2f\n'], ...
+    medF, loF, hiF, nF, ...
+    medM, loM, hiM, nM, ...
+    p_label(p), d);
+
+end
+
+
