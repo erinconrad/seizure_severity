@@ -46,7 +46,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 5000;
+nBoot    = 0;%5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -108,9 +108,10 @@ fprintf('Saved Fig 1: %s\n', fig1_out);
     spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
         canonical3, spearman_xLims, spearman_yLims, fig2_out, 'MeanSzFreq', '', false);
 
-spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
-    canonical3, spearman_xLims, spearman_yLims, figS1_out, ...
-    'MeanSzFreq', ' (positive spike/seizures only)', true);
+[SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, rho_lo_S1, rho_hi_S1, subtype_ci_S1] = ...
+    spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
+        canonical3, spearman_xLims, spearman_yLims, figS1_out, 'MeanSzFreq', ...
+        ' (positive spike/seizures only)', true);
 
 fprintf('Saved Fig 2: %s\n', fig2_out);
 fprintf('Saved Fig S1: %s\n', figS1_out);
@@ -142,6 +143,8 @@ fprintf('Wrote Table S1: %s\n', tableS1Csv);
 write_results_html(resultsHtml, Views, SzFreqPerPatient, Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, ...
     rho_lo_main, rho_hi_main, subtype_ci_main, ...
+    SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
+    rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
     Views.ReportForKeptSessions, MMR);
 fprintf('Wrote HTML: %s\n', resultsHtml);
 
@@ -1288,6 +1291,21 @@ n_rep_abs  = nnz(RS_all.SpikeStatus=="absent");
 n_rep_unk  = nnz(RS_all.SpikeStatus=="unknown");
 n_eegs_all = height(RS_all);
 
+% Patient-level spike status
+[gp_rs, pid_rs] = findgroups(RS_all.Patient);
+hasPresent = splitapply(@(x) any(string(x)=="present"), RS_all.SpikeStatus, gp_rs);
+hasAbsent  = splitapply(@(x) any(string(x)=="absent"),  RS_all.SpikeStatus, gp_rs);
+% Present: any EEG with spikes reported
+% Absent: no EEG with spikes reported, but at least one EEG with a report
+% Unknown: no EEG with any report
+pat_spike_status = repmat("unknown", numel(pid_rs), 1);
+pat_spike_status(hasAbsent & ~hasPresent)  = "absent";
+pat_spike_status(hasPresent)               = "present";
+n_pats_pre = nnz(pat_spike_status=="present");
+n_pats_abs = nnz(pat_spike_status=="absent");
+n_pats_unk = nnz(pat_spike_status=="unknown");
+n_pats_rs  = numel(pid_rs);
+
 OutVar = {}; OutStat = {};
 OutVar{end+1,1}="Total N patients"; OutStat{end+1,1}=sprintf('%d',N_total);
 OutVar{end+1,1}="Age at first visit (years)"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',age_med,age_q(1),age_q(2));
@@ -1305,10 +1323,15 @@ OutVar{end+1,1}="Number of clinic visits"; OutStat{end+1,1}=sprintf('%.1f (%.1f-
 OutVar{end+1,1}="Number of EEGs"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',eeg_med,eeg_q(1),eeg_q(2));
 OutVar{end+1,1}="Mean seizure frequency (seizures/month)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sf_med,sf_q(1),sf_q(2),sf_lo,sf_hi);
 OutVar{end+1,1}="Mean spike rate (spikes/hour)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sr_med,sr_q(1),sr_q(2),sr_lo,sr_hi);
-OutVar{end+1,1}="Reported spikes"; OutStat{end+1,1}="";
+OutVar{end+1,1}="EEGs with reported spikes";  OutStat{end+1,1}="N (% EEGs)";
 OutVar{end+1,1}="    Present"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_pre,100*n_rep_pre/max(1,n_eegs_all));
 OutVar{end+1,1}="    Absent";  OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_abs,100*n_rep_abs/max(1,n_eegs_all));
 OutVar{end+1,1}="    Unknown"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_unk,100*n_rep_unk/max(1,n_eegs_all));
+OutVar{end+1,1}="Patients with reported spikes"; OutStat{end+1,1}="N (% patients)";
+OutVar{end+1,1}="    Present"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_pre,100*n_pats_pre/max(1,n_pats_rs));
+OutVar{end+1,1}="    Absent";  OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_abs,100*n_pats_abs/max(1,n_pats_rs));
+OutVar{end+1,1}="    Unknown"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_unk,100*n_pats_unk/max(1,n_pats_rs));
+
 
 Table1_flat = table(string(OutVar), string(OutStat), 'VariableNames',{'Variable','Statistic'});
 end
@@ -1387,7 +1410,10 @@ end
 
 function write_results_html(outPath, Views, SzFreqPerPatient, Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, ...
-    rho_lo_main, rho_hi_main, subtype_ci_main, ReportForKeptSessions, MMR)
+    rho_lo_main, rho_hi_main, subtype_ci_main, ...
+    SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
+    rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
+    ReportForKeptSessions, MMR)
 
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 fid = fopen(outPath,'w');
@@ -1430,7 +1456,23 @@ fprintf(fid,'Subtype-specific correlations were significant for generalized epil
     SpearmanResults_main.N(1), SpearmanResults_main.Spearman_r(1), subtype_ci_main.ci_lo(1), subtype_ci_main.ci_hi(1), format_p_html(SpearmanResults_main.p_bonf(1)), ...
     SpearmanResults_main.N(2), SpearmanResults_main.Spearman_r(2), subtype_ci_main.ci_lo(2), subtype_ci_main.ci_hi(2), format_p_html(SpearmanResults_main.p_bonf(2)), ...
     SpearmanResults_main.N(3), SpearmanResults_main.Spearman_r(3), subtype_ci_main.ci_lo(3), subtype_ci_main.ci_hi(3), format_p_html(SpearmanResults_main.p_bonf(3)));
-fprintf(fid,'Results were similar when restricting to patients with non-zero spike rates and seizure frequencies (Fig. S1). ');
+
+% S1 Spearman (non-zero only)
+canonical_order = ["General","Temporal","Frontal"];
+g = canonical_order(2);
+row   = SpearmanResults_S1(strcmp(string(SpearmanResults_S1.Group), g), :);
+rowCI = subtype_ci_S1(subtype_ci_S1.Group == g, :);
+    
+if isfinite(rowCI.ci_lo) && isfinite(rowCI.ci_hi)
+    ci_str = sprintf('[%.2f-%.2f]', rowCI.ci_lo, rowCI.ci_hi);
+else
+    ci_str = '';
+end
+fprintf(fid,['When restricting to patients with non-zero spike rates and seizure frequencies, '...
+    'results were similar, although the temporal epilepsy correlation was slightly smaller (&rho;=%.2f %s) '...
+    'and no longer significant in this subgroup (Fig. S1). '],row.Spearman_r, ci_str);
+
+
 fprintf(fid,'Patients with spikes on at least one EEG had higher mean seizure frequencies (Fig. S2).</p>\n');
 
 %% Figure 3
@@ -1635,7 +1677,10 @@ for p = 1:3
     idx  = (string(PatientSpikeSz_Typed.EpiType3)==gStr) & ...
            isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perHour) & ...
            isfinite(PatientSpikeSz_Typed.(freqFieldName));
-    if nonZeroOnly, idx=idx&(PatientSpikeSz_Typed.MeanSpikeRate_perHour>0); end
+    if nonZeroOnly
+        idx = idx & (PatientSpikeSz_Typed.MeanSpikeRate_perHour>0) & ...
+                    (PatientSpikeSz_Typed.(freqFieldName)>0);
+    end
     if nnz(idx)==0, axis(ax,'off'); continue; end
 
     x_raw=double(PatientSpikeSz_Typed.(freqFieldName)(idx));

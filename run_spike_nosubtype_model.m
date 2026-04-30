@@ -95,8 +95,17 @@ PairTable = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
 fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
     height(PairTable), numel(unique(PairTable.Patient)));
 
+%% ======================= BUILD PAIR TABLE (ALL EPILEPSY) =======================
+PairTable_AllEpi = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
+    Views.ReportForKeptSessions, Views.PatientTyping_AllEpilepsy);
+fprintf('All-epilepsy pairs: %d, patients: %d\n', ...
+    height(PairTable_AllEpi), numel(unique(PairTable_AllEpi.Patient)));
+
 %% ======================= FIT MODELS =======================
 MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
+
+%% ======================= FIT MODEL 4 (ALL EPILEPSY, NO SUBTYPE) =======================
+MMR4 = fit_model4_allepi(PairTable_AllEpi, nBoot, alpha);
 
 %% ======================= FIGURE 1 =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
@@ -108,9 +117,10 @@ fprintf('Saved Fig 1: %s\n', fig1_out);
     spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
         canonical3, spearman_xLims, spearman_yLims, fig2_out, 'MeanSzFreq', '', false);
 
-spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
-    canonical3, spearman_xLims, spearman_yLims, figS1_out, ...
-    'MeanSzFreq', ' (positive spike/seizures only)', true);
+[SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, rho_lo_S1, rho_hi_S1, subtype_ci_S1] = ...
+    spearman_plotting_function(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
+        canonical3, spearman_xLims, spearman_yLims, figS1_out, 'MeanSzFreq', ...
+        ' (positive spike/seizures only)', true);
 
 fprintf('Saved Fig 2: %s\n', fig2_out);
 fprintf('Saved Fig S1: %s\n', figS1_out);
@@ -135,15 +145,18 @@ writetable(Table1_flat, Table1Csv);
 fprintf('Wrote Table 1: %s\n', Table1Csv);
 
 %% ======================= TABLE S1 =======================
-write_tableS1(MMR, tableS1Csv);
+write_tableS1(MMR, MMR4, tableS1Csv);
 fprintf('Wrote Table S1: %s\n', tableS1Csv);
 
 %% ======================= HTML RESULTS =======================
 write_results_html(resultsHtml, Views, SzFreqPerPatient, Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, ...
     rho_lo_main, rho_hi_main, subtype_ci_main, ...
+    SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
+    rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
     Views.ReportForKeptSessions, MMR);
 fprintf('Wrote HTML: %s\n', resultsHtml);
+
 
 end
 
@@ -607,6 +620,11 @@ formula_M3 = ['LogSzFreq ~ ' ...
     'LogSpikesPerHour * LagDirection + ' ...
     'EpiType3_cat + (1|PatientID)'];
 
+% Model 4 (ALL EPILEPSY, no subtype): both interactions, no subtype fixed effect
+formula_M4 = ['HasSz_bin ~ ' ...
+    'LogSpikesPerHour * AbsLag_years + ' ...
+    'LogSpikesPerHour * LagDirection + (1|PatientID)'];
+
 %% Fit models
 glme_opts = {'Distribution','Binomial','Link','logit', ...
     'FitMethod','Laplace','CovariancePattern','Diagonal'};
@@ -628,6 +646,8 @@ try
     mdl_M3 = fitlme(T, formula_M3, 'FitMethod','REML');
     fprintf('Model 3 converged.\n'); disp(mdl_M3);
 catch ME; fprintf('Model 3 failed: %s\n', ME.message); mdl_M3 = []; end
+
+
 
 %% LRT: Model 1 vs Model 2 — tests both interactions jointly, chi^2(2)
 fprintf('\n=== LIKELIHOOD RATIO TEST ===\n');
@@ -1287,6 +1307,21 @@ n_rep_abs  = nnz(RS_all.SpikeStatus=="absent");
 n_rep_unk  = nnz(RS_all.SpikeStatus=="unknown");
 n_eegs_all = height(RS_all);
 
+% Patient-level spike status
+[gp_rs, pid_rs] = findgroups(RS_all.Patient);
+hasPresent = splitapply(@(x) any(string(x)=="present"), RS_all.SpikeStatus, gp_rs);
+hasAbsent  = splitapply(@(x) any(string(x)=="absent"),  RS_all.SpikeStatus, gp_rs);
+% Present: any EEG with spikes reported
+% Absent: no EEG with spikes reported, but at least one EEG with a report
+% Unknown: no EEG with any report
+pat_spike_status = repmat("unknown", numel(pid_rs), 1);
+pat_spike_status(hasAbsent & ~hasPresent)  = "absent";
+pat_spike_status(hasPresent)               = "present";
+n_pats_pre = nnz(pat_spike_status=="present");
+n_pats_abs = nnz(pat_spike_status=="absent");
+n_pats_unk = nnz(pat_spike_status=="unknown");
+n_pats_rs  = numel(pid_rs);
+
 OutVar = {}; OutStat = {};
 OutVar{end+1,1}="Total N patients"; OutStat{end+1,1}=sprintf('%d',N_total);
 OutVar{end+1,1}="Age at first visit (years)"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',age_med,age_q(1),age_q(2));
@@ -1304,10 +1339,15 @@ OutVar{end+1,1}="Number of clinic visits"; OutStat{end+1,1}=sprintf('%.1f (%.1f-
 OutVar{end+1,1}="Number of EEGs"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',eeg_med,eeg_q(1),eeg_q(2));
 OutVar{end+1,1}="Mean seizure frequency (seizures/month)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sf_med,sf_q(1),sf_q(2),sf_lo,sf_hi);
 OutVar{end+1,1}="Mean spike rate (spikes/hour)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sr_med,sr_q(1),sr_q(2),sr_lo,sr_hi);
-OutVar{end+1,1}="Reported spikes"; OutStat{end+1,1}="";
+OutVar{end+1,1}="EEGs with reported spikes";  OutStat{end+1,1}="N (% EEGs)";
 OutVar{end+1,1}="    Present"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_pre,100*n_rep_pre/max(1,n_eegs_all));
 OutVar{end+1,1}="    Absent";  OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_abs,100*n_rep_abs/max(1,n_eegs_all));
 OutVar{end+1,1}="    Unknown"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_rep_unk,100*n_rep_unk/max(1,n_eegs_all));
+OutVar{end+1,1}="Patients with reported spikes"; OutStat{end+1,1}="N (% patients)";
+OutVar{end+1,1}="    Present"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_pre,100*n_pats_pre/max(1,n_pats_rs));
+OutVar{end+1,1}="    Absent";  OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_abs,100*n_pats_abs/max(1,n_pats_rs));
+OutVar{end+1,1}="    Unknown"; OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_pats_unk,100*n_pats_unk/max(1,n_pats_rs));
+
 
 Table1_flat = table(string(OutVar), string(OutStat), 'VariableNames',{'Variable','Statistic'});
 end
@@ -1316,7 +1356,7 @@ end
 %% TABLE S1
 %% =====================================================================
 
-function write_tableS1(MMR, outPath)
+function write_tableS1(MMR, MMR4,outPath)
 
 function disp = clean_term(raw)
     disp = raw;
@@ -1373,6 +1413,32 @@ if ~isempty(MMR.FE_M3)
     end
 end
 
+% Model 4 (All epilepsy, no subtype)
+if ~isempty(MMR4) && ~isempty(MMR4.FE_M4)
+    use_boot4 = ~isempty(MMR4.BootstrapTable4);
+    BT4 = MMR4.BootstrapTable4;
+    FE4 = MMR4.FE_M4;
+    for i = 1:height(FE4)
+        term = string(FE4.Term(i));
+        if term=="(Intercept)", continue; end
+        or_pt = FE4.OR(i); p_val = FE4.p(i);
+        if use_boot4
+            bt_row = BT4(string(BT4.Term)==term,:);
+            if ~isempty(bt_row)
+                ci_lo=bt_row.OR_CI_lo; ci_hi=bt_row.OR_CI_hi; ci_src='Bootstrap';
+            else
+                ci_lo=FE4.OR_lo(i); ci_hi=FE4.OR_hi(i); ci_src='Laplace';
+            end
+        else
+            ci_lo=FE4.OR_lo(i); ci_hi=FE4.OR_hi(i); ci_src='Laplace';
+        end
+        if p_val<0.001, p_str='<0.001'; elseif p_val<0.01, p_str=sprintf('%.3f',p_val); else, p_str=sprintf('%.2f',p_val); end
+        rows(end+1,:) = {'Model 4 (All epilepsy, no subtype, both interactions)', ...
+            clean_term(char(term)), sprintf('%.3f',or_pt), ...
+            sprintf('%.3f',ci_lo), sprintf('%.3f',ci_hi), ci_src, p_str}; %#ok<AGROW>
+    end
+end
+
 T_out = cell2table(rows, 'VariableNames', ...
     {'Model','Term','Estimate','CI_lower','CI_upper','CI_method','p_value'});
 fprintf('Table S1: %d rows. Model 1: OR. Model 3: Beta.\n', height(T_out));
@@ -1386,7 +1452,10 @@ end
 
 function write_results_html(outPath, Views, SzFreqPerPatient, Fig1Stats, ...
     SpearmanResults_main, rs_all_main, p_all_main, n_all_main, ...
-    rho_lo_main, rho_hi_main, subtype_ci_main, ReportForKeptSessions, MMR)
+    rho_lo_main, rho_hi_main, subtype_ci_main, ...
+    SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
+    rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
+    ReportForKeptSessions, MMR)
 
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 fid = fopen(outPath,'w');
@@ -1429,7 +1498,23 @@ fprintf(fid,'Subtype-specific correlations were significant for generalized epil
     SpearmanResults_main.N(1), SpearmanResults_main.Spearman_r(1), subtype_ci_main.ci_lo(1), subtype_ci_main.ci_hi(1), format_p_html(SpearmanResults_main.p_bonf(1)), ...
     SpearmanResults_main.N(2), SpearmanResults_main.Spearman_r(2), subtype_ci_main.ci_lo(2), subtype_ci_main.ci_hi(2), format_p_html(SpearmanResults_main.p_bonf(2)), ...
     SpearmanResults_main.N(3), SpearmanResults_main.Spearman_r(3), subtype_ci_main.ci_lo(3), subtype_ci_main.ci_hi(3), format_p_html(SpearmanResults_main.p_bonf(3)));
-fprintf(fid,'Results were similar when restricting to patients with non-zero spike rates and seizure frequencies (Fig. S1). ');
+
+% S1 Spearman (non-zero only)
+canonical_order = ["General","Temporal","Frontal"];
+g = canonical_order(2);
+row   = SpearmanResults_S1(strcmp(string(SpearmanResults_S1.Group), g), :);
+rowCI = subtype_ci_S1(subtype_ci_S1.Group == g, :);
+    
+if isfinite(rowCI.ci_lo) && isfinite(rowCI.ci_hi)
+    ci_str = sprintf('[%.2f-%.2f]', rowCI.ci_lo, rowCI.ci_hi);
+else
+    ci_str = '';
+end
+fprintf(fid,['When restricting to patients with non-zero spike rates and seizure frequencies, '...
+    'results were similar, although the temporal epilepsy correlation was slightly smaller (&rho;=%.2f %s) '...
+    'and no longer significant in this subgroup (Fig. S1). '],row.Spearman_r, ci_str);
+
+
 fprintf(fid,'Patients with spikes on at least one EEG had higher mean seizure frequencies (Fig. S2).</p>\n');
 
 %% Figure 3
@@ -1470,28 +1555,31 @@ fprintf(fid,['<p>Seizure frequency varies over time within individuals, '...
 
 fprintf(fid,'<p>Higher spike rates were associated with higher odds of reporting seizures at a clinic visit (OR=%.2f [95%% CI %.2f-%.2f], %s; Fig. 3D). ', ...
     r_spike.OR, r_spike.OR_CI_lo, r_spike.OR_CI_hi, format_p_html(getP('LogSpikesPerHour')));
-fprintf(fid,['The spike-seizure association attenuated with greater EEG-visit distance '...
+fprintf(fid,['The spike-seizure association attenuated with greater EEG-visit distance, although the effect was small '...
     '(OR=%.3f [%.3f-%.3f], %s): e.g., the model-predicted OR for spike rate was '], ...
     r_int_prox.OR, r_int_prox.OR_CI_lo, r_int_prox.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:AbsLag_years')));
 
-    fprintf(fid,['%.2f at a 6-month lag, %.2f at 2 years, and %.2f at 4 years ' ...
-        '(Fig. 3B). '], ...
-        or_at_lag(1), or_at_lag(2), or_at_lag(3));
+
+b_spike_val    = MMR.FE_M1.Beta(string(MMR.FE_M1.Term) == "LogSpikesPerHour");
+    b_int_prox_val = MMR.FE_M1.Beta(string(MMR.FE_M1.Term) == "LogSpikesPerHour:AbsLag_years");
+    or_at_lag      = exp(b_spike_val + b_int_prox_val .* [0.5, 2, 4]);
+fprintf(fid,['%.2f at a 6-month lag, %.2f at 2 years, and %.2f at 4 years ' ...
+    '(Fig. 3B). '], ...
+    or_at_lag(1), or_at_lag(2), or_at_lag(3));
 
 
-fprintf(fid,['The interaction between spike rate and lag direction was not significant  (OR=%.3f [%.3f-%.3f], %s), '...
-    'suggesting that spike rates measured from EEGs obtained before versus after a clinic visit were similarly associated with seizure occurrence. '], ...
+fprintf(fid,['Spike rates from EEGs obtained before versus after a clinic '...
+    'visit were similarly associated with seizure occurrence  (interaction OR=%.3f [%.3f-%.3f], %s). '], ...
     r_int_dir.OR, r_int_dir.OR_CI_lo, r_int_dir.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:LagDirection')));
-fprintf(fid,'Clinic visits after the EEG were associated with lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), consistent with clinical improvement over time. ', ...
+fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), consistent with gradual clinical improvement over time (Supplemental Figure 3). ', ...
     r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('LagDirection')));
 fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ significantly (OR=%.2f [%.2f-%.2f], %s). ', ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
 fprintf(fid,'Results were consistent when using log-transformed continuous seizure frequency as the outcome (Table S1). ');
-fprintf(fid,['Together, these results agree with our correlation-based analyses '...
-    'finding a positive association between spike rate and seizure frequency, '...
-    'and also suggest stronger associations for clinic visits close to the EEG, '...
-    'supporting the hypothesis that spike rates track seizure frequency over time within individuals.</p>\n']);
+fprintf(fid,['Together, these results confirm a positive spike rate–seizure association '...
+    'and suggest it is strongest when the EEG is obtained close to the clinic visit, '...
+    'consistent with spike rates tracking within-individual seizure burden over time.</p>\n']);
 
 fprintf(fid,'</body></html>\n');
 fclose(fid);
@@ -1631,7 +1719,10 @@ for p = 1:3
     idx  = (string(PatientSpikeSz_Typed.EpiType3)==gStr) & ...
            isfinite(PatientSpikeSz_Typed.MeanSpikeRate_perHour) & ...
            isfinite(PatientSpikeSz_Typed.(freqFieldName));
-    if nonZeroOnly, idx=idx&(PatientSpikeSz_Typed.MeanSpikeRate_perHour>0); end
+    if nonZeroOnly
+        idx = idx & (PatientSpikeSz_Typed.MeanSpikeRate_perHour>0) & ...
+                    (PatientSpikeSz_Typed.(freqFieldName)>0);
+    end
     if nnz(idx)==0, axis(ax,'off'); continue; end
 
     x_raw=double(PatientSpikeSz_Typed.(freqFieldName)(idx));
@@ -1817,4 +1908,66 @@ if n1==0||n2==0, d=NaN; return; end
 [~,~,stats]=ranksum(x1,x2,'method','approx');
 R1=stats.ranksum; U1=R1-n1*(n1+1)/2;
 d=(2*U1/(n1*n2))-1;
+end
+
+function MMR4 = fit_model4_allepi(PairTable, nBoot, alpha)
+if nargin < 2, nBoot = 0; end
+if nargin < 3, alpha = 0.05; end
+
+keepMask = isfinite(PairTable.LogSpikesPerHour) & ...
+           isfinite(PairTable.SignedLag_years)  & ...
+           isfinite(PairTable.HasSz);
+T = PairTable(keepMask, :);
+
+T.HasSz_bin    = double(T.HasSz == 1);
+T.AbsLag_years = abs(T.SignedLag_years);
+T.LagDirection = sign(T.SignedLag_years);
+T.LagDirection(T.SignedLag_years == 0) = 1;
+T.PatientID    = categorical(T.Patient);
+
+fprintf('[Model 4 table] %d pairs, %d patients\n', height(T), numel(unique(T.Patient)));
+
+formula_M4 = ['HasSz_bin ~ ' ...
+    'LogSpikesPerHour * AbsLag_years + ' ...
+    'LogSpikesPerHour * LagDirection + (1|PatientID)'];
+
+formula_M4_base = ['HasSz_bin ~ ' ...
+    'LogSpikesPerHour + AbsLag_years + LagDirection + (1|PatientID)'];
+
+glme_opts = {'Distribution','Binomial','Link','logit', ...
+    'FitMethod','Laplace','CovariancePattern','Diagonal'};
+
+fprintf('\nFitting Model 4 (all epilepsy, no subtype, both interactions)...\n');
+try
+    mdl_M4 = fitglme(T, formula_M4, glme_opts{:});
+    fprintf('Model 4 converged.\n'); disp(mdl_M4);
+catch ME; fprintf('Model 4 failed: %s\n', ME.message); mdl_M4 = []; end
+
+fprintf('\nFitting Model 4 baseline (no interactions)...\n');
+try
+    mdl_M4_base = fitglme(T, formula_M4_base, glme_opts{:});
+    fprintf('Model 4 baseline converged.\n');
+catch ME; fprintf('Model 4 baseline failed: %s\n', ME.message); mdl_M4_base = []; end
+
+lrt_p4 = NaN;
+if ~isempty(mdl_M4) && ~isempty(mdl_M4_base)
+    lrt4 = compare(mdl_M4_base, mdl_M4); disp(lrt4);
+    lrt_p4 = lrt4.pValue(2);
+end
+
+T_fe4 = [];
+if ~isempty(mdl_M4)
+    [b,bn,s] = fixedEffects(mdl_M4, 'Alpha', alpha);
+    T_fe4 = make_fe_table_logistic(bn, b, s);
+    fprintf('\nModel 4 fixed effects:\n'); disp(T_fe4);
+end
+
+[T_boot4, boot_betas4] = run_bootstrap(T, mdl_M4, formula_M4, nBoot, alpha, 'Model 4');
+
+MMR4.ModelTable    = T;
+MMR4.mdl_M4        = mdl_M4;
+MMR4.FE_M4         = T_fe4;
+MMR4.BootstrapTable4 = T_boot4;
+MMR4.BootstrapBetas4 = boot_betas4;  % add this
+MMR4.LRT_p4        = lrt_p4;
 end
