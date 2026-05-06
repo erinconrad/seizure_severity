@@ -796,9 +796,17 @@ ci_lo = prctile(boot_betas, 100*(alpha/2),   1);
 ci_hi = prctile(boot_betas, 100*(1-alpha/2), 1);
 [beta_obs, betanames_obs] = fixedEffects(mdl);
 
+% Bootstrap two-tailed p-value: 2 * min(prop <= 0, prop >= 0)
+boot_p = nan(numel(beta_obs), 1);
+for k = 1:numel(beta_obs)
+    p_lo = mean(boot_betas(:,k) <= 0);
+    p_hi = mean(boot_betas(:,k) >= 0);
+    boot_p(k) = min(2 * min(p_lo, p_hi), 1);
+end
+
 T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), ...
-    exp(beta_obs), exp(ci_lo(:)), exp(ci_hi(:)), ...
-    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','OR','OR_CI_lo','OR_CI_hi'});
+    exp(beta_obs), exp(ci_lo(:)), exp(ci_hi(:)), boot_p, ...
+    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','OR','OR_CI_lo','OR_CI_hi','Boot_p'});
 fprintf('%s bootstrapped ORs:\n', label); disp(T_boot);
 end
 
@@ -995,7 +1003,19 @@ isInt       = (disp_names=="Intercept");
 OR_C        = OR_C(~isInt);
 OR_lo_C     = OR_lo_C(~isInt);
 OR_hi_C     = OR_hi_C(~isInt);
-pvals_C     = stats_m.pValue(~isInt);
+
+pvals_C = stats_m.pValue(~isInt);   % Wald fallback
+if ~isempty(MMR.BootstrapTable1)
+    BT_fig = MMR.BootstrapTable1;
+    for k = 1:numel(disp_names)
+        raw_nm = raw_names(~isInt);
+        bt_row = BT_fig(string(BT_fig.Term)==raw_nm(k), :);
+        if ~isempty(bt_row) && ismember('Boot_p', bt_row.Properties.VariableNames)
+            pvals_C(k) = bt_row.Boot_p;
+        end
+    end
+end
+
 disp_names  = disp_names(~isInt);
 nTerms      = numel(OR_C);
 plot_order  = nTerms:-1:1;
@@ -1437,7 +1457,13 @@ for mi = 1:size(model_specs,1)
     for i = 1:height(FE)
         term = string(FE.Term(i));
         if term=="(Intercept)", continue; end
-        p_val = FE.p(i);
+        p_val = FE.p(i);   % Wald fallback
+        if ~isempty(BT)
+            bt_row_p = BT(string(BT.Term)==term, :);
+            if ~isempty(bt_row_p) && ismember('Boot_p', bt_row_p.Properties.VariableNames)
+                p_val = bt_row_p.Boot_p;
+            end
+        end
 
         if is_logistic
             est_pt = FE.OR(i);
@@ -1569,7 +1595,8 @@ r_int_dir  = getRow(BT,'LogSpikesPerHour:LagDirection');
 r_frontal  = getRow(BT,'EpiType3_cat_Frontal');
 r_general  = getRow(BT,'EpiType3_cat_General');
 FE1  = MMR.FE_M1;
-getP = @(nm) FE1.p(string(FE1.Term)==nm);
+BT1  = MMR.BootstrapTable1;
+getP = @(nm) get_p_preferred(FE1, BT1, nm);
 
 n_pairs = height(MMR.ModelTable);
 n_pats  = numel(unique(MMR.ModelTable.Patient));
@@ -1978,8 +2005,16 @@ ci_lo = prctile(boot_betas, 100*(alpha/2),   1);
 ci_hi = prctile(boot_betas, 100*(1-alpha/2), 1);
 [beta_obs, betanames_obs] = fixedEffects(mdl);
 
-T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), ...
-    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi'});
+% Bootstrap two-tailed p-value
+boot_p = nan(numel(beta_obs), 1);
+for k = 1:numel(beta_obs)
+    p_lo = mean(boot_betas(:,k) <= 0);
+    p_hi = mean(boot_betas(:,k) >= 0);
+    boot_p(k) = min(2 * min(p_lo, p_hi), 1);
+end
+
+T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), boot_p, ...
+    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','Boot_p'});
 fprintf('%s bootstrapped betas:\n', label); disp(T_boot);
 end
 
@@ -2059,4 +2094,15 @@ EPS_SPIKE = 1e-3;
 PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE);
 PairTable.SignedLag_years  = PairTable.SignedLag_days / 365.25;
 PairTable.PatientID        = categorical(PairTable.Patient);
+end
+
+function p = get_p_preferred(FE, BT, nm)
+% Use bootstrap p if available, otherwise fall back to Wald p from FE table
+p = FE.p(string(FE.Term)==nm);   % default
+if ~isempty(BT) && ismember('Boot_p', BT.Properties.VariableNames)
+    bt_row = BT(string(BT.Term)==nm, :);
+    if ~isempty(bt_row)
+        p = bt_row.Boot_p;
+    end
+end
 end
