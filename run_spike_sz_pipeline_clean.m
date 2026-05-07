@@ -1004,12 +1004,12 @@ OR_C        = OR_C(~isInt);
 OR_lo_C     = OR_lo_C(~isInt);
 OR_hi_C     = OR_hi_C(~isInt);
 
-pvals_C = stats_m.pValue(~isInt);   % Wald fallback
+pvals_C        = stats_m.pValue(~isInt);   % Wald fallback
+raw_names_plot = raw_names(~isInt);
 if ~isempty(MMR.BootstrapTable1)
     BT_fig = MMR.BootstrapTable1;
-    for k = 1:numel(disp_names)
-        raw_nm = raw_names(~isInt);
-        bt_row = BT_fig(string(BT_fig.Term)==raw_nm(k), :);
+    for k = 1:numel(raw_names_plot)
+        bt_row = BT_fig(string(BT_fig.Term)==raw_names_plot(k), :);
         if ~isempty(bt_row) && ismember('Boot_p', bt_row.Properties.VariableNames)
             pvals_C(k) = bt_row.Boot_p;
         end
