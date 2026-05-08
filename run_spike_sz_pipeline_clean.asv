@@ -1520,6 +1520,7 @@ fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure
 fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ significantly (OR=%.2f [%.2f-%.2f], %s). ', ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
+fprintf(fid,'Results were consistent when using log-transformed continuous seizure frequency as the outcome (Table S1). ');
 fprintf(fid,['Together, these results confirm a positive spike rate–seizure association '...
     'and suggest it is strongest when the EEG is obtained close to the clinic visit, '...
     'consistent with spike rates tracking within-individual seizure burden over time.</p>\n']);
@@ -1854,8 +1855,132 @@ d=(2*U1/(n1*n2))-1;
 end
 
 
+function [T_boot, boot_betas] = run_bootstrap_lme(T, mdl, formula, nBoot, alpha, label)
+T_boot     = [];
+boot_betas = [];
+if isempty(mdl) || nBoot == 0, return; end
+
+fprintf('\nBootstrapping %s (%d iterations)...\n', label, nBoot);
+patients   = unique(T.PatientID);
+nPat       = numel(patients);
+nFixed     = size(fixedEffects(mdl), 1);
+boot_betas = nan(nBoot, nFixed);
+
+parfor b = 1:nBoot
+    idx      = randi(nPat, nPat, 1);
+    bootPats = patients(idx);
+    Tboot    = cell(nPat, 1);
+    for k = 1:nPat
+        Tboot{k} = T(T.PatientID == bootPats(k), :);
+        Tboot{k}.PatientID = categorical(repmat(k, height(Tboot{k}), 1));
+    end
+    Tboot = vertcat(Tboot{:});
+    try
+        mboot = fitlme(Tboot, formula, 'FitMethod','REML');
+        boot_betas(b,:) = fixedEffects(mboot)';
+    catch
+    end
+end
+
+converged  = all(isfinite(boot_betas), 2);
+boot_betas = boot_betas(converged, :);
+fprintf('%s bootstrap: %d/%d converged (%.1f%%)\n', ...
+    label, sum(converged), nBoot, 100*mean(converged));
+
+ci_lo = prctile(boot_betas, 100*(alpha/2),   1);
+ci_hi = prctile(boot_betas, 100*(1-alpha/2), 1);
+[beta_obs, betanames_obs] = fixedEffects(mdl);
+
+% Bootstrap two-tailed p-value
+boot_p = nan(numel(beta_obs), 1);
+for k = 1:numel(beta_obs)
+    p_lo = mean(boot_betas(:,k) <= 0);
+    p_hi = mean(boot_betas(:,k) >= 0);
+    boot_p(k) = min(2 * min(p_lo, p_hi), 1);
+end
+
+T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), boot_p, ...
+    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','Boot_p'});
+fprintf('%s bootstrapped betas:\n', label); disp(T_boot);
+end
 
 
+function PairTable = build_eeg_visit_pairs_nosubtype(Vuniq, SessionLevelSpikeRates, ...
+    ReportForKeptSessions, PatientTyping_AllEpilepsy)
+%% All-epilepsy patients — no EpiType3 restriction
+
+EEG_raw = ReportForKeptSessions.start_time_deid;
+if isdatetime(EEG_raw), EEG_dt = EEG_raw;
+else, EEG_dt = datetime(strtrim(string(EEG_raw)), 'InputFormat', "yyyy-MM-dd'T'HH:mm:ss");
+end
+
+EEG_dates = table(double(ReportForKeptSessions.Patient), ...
+    double(ReportForKeptSessions.Session), EEG_dt, ...
+    'VariableNames',{'Patient','Session','EEG_Date'});
+EEG_dates = EEG_dates(~isnat(EEG_dates.EEG_Date), :);
+
+EEG_tbl = innerjoin(EEG_dates, ...
+    SessionLevelSpikeRates(:,{'Patient','Session','SpikesPerHour'}), ...
+    'Keys',{'Patient','Session'});
+
+% Use all epilepsy patients — join only to get Patient list, no EpiType3
+AllEpiPatients = unique(PatientTyping_AllEpilepsy.Patient);
+Vep = Vuniq(ismember(Vuniq.Patient, AllEpiPatients), {'Patient','VisitDate','Freq_R1','HasSz'});
+
+patients  = intersect(unique(EEG_tbl.Patient), unique(Vep.Patient));
+nEstimate = 0;
+for i = 1:numel(patients)
+    p = patients(i);
+    nEstimate = nEstimate + sum(EEG_tbl.Patient==p) * sum(Vep.Patient==p);
+end
+
+Patient_out       = nan(nEstimate,1);
+Session_out       = nan(nEstimate,1);
+VisitDate_out     = NaT(nEstimate,1);
+SpikesPerHour_out = nan(nEstimate,1);
+SzFreq_out        = nan(nEstimate,1);
+HasSz_out         = nan(nEstimate,1);
+SignedLag_out     = nan(nEstimate,1);
+
+row = 0;
+for i = 1:numel(patients)
+    p        = patients(i);
+    eeg_rows = EEG_tbl(EEG_tbl.Patient==p, :);
+    vis_rows = Vep(Vep.Patient==p, :);
+    for e = 1:height(eeg_rows)
+        for v = 1:height(vis_rows)
+            row = row + 1;
+            Patient_out(row)       = p;
+            Session_out(row)       = eeg_rows.Session(e);
+            VisitDate_out(row)     = vis_rows.VisitDate(v);
+            SpikesPerHour_out(row) = eeg_rows.SpikesPerHour(e);
+            SzFreq_out(row)        = vis_rows.Freq_R1(v);
+            HasSz_out(row)         = vis_rows.HasSz(v);
+            SignedLag_out(row)     = days(vis_rows.VisitDate(v) - eeg_rows.EEG_Date(e));
+        end
+    end
+end
+
+PairTable = table(Patient_out(1:row), Session_out(1:row), VisitDate_out(1:row), ...
+    SpikesPerHour_out(1:row), SzFreq_out(1:row), HasSz_out(1:row), ...
+    SignedLag_out(1:row), ...
+    'VariableNames',{'Patient','Session','VisitDate','SpikesPerHour','SzFreq', ...
+                     'HasSz','SignedLag_days'});
+
+PairTable.EEG_ID = categorical(string(PairTable.Patient) + "_" + string(PairTable.Session));
+
+keepMask  = isfinite(PairTable.SpikesPerHour) & isfinite(PairTable.SzFreq) & ...
+            isfinite(PairTable.SignedLag_days);
+n_before  = height(PairTable);
+PairTable = PairTable(keepMask,:);
+fprintf('[build_eeg_visit_pairs_nosubtype] %d patients, %d pairs (%d removed)\n', ...
+    numel(patients), height(PairTable), n_before-height(PairTable));
+
+EPS_SPIKE = 1e-3;
+PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE);
+PairTable.SignedLag_years  = PairTable.SignedLag_days / 365.25;
+PairTable.PatientID        = categorical(PairTable.Patient);
+end
 
 function p = get_p_preferred(FE, BT, nm)
 % Use bootstrap p if available, otherwise fall back to Wald p from FE table

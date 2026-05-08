@@ -89,14 +89,20 @@ Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, ..
     SzFreqPerPatient, NESD_LABEL, badTypes, canonical3);
 
 %% ======================= BUILD PAIR TABLE =======================
-% Canonical-subtype patients only
+% Canonical-subtype patients — for M1-M3
 PairTable = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
     Views.ReportForKeptSessions, Views.PatientTypingFiltered);
 fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
     height(PairTable), numel(unique(PairTable.Patient)));
 
+% All epilepsy patients — for M4-M6 (no subtype restriction)
+PairTable_Full = build_eeg_visit_pairs_nosubtype(Vuniq, Views.SessionLevelSpikeRates, ...
+    Views.ReportForKeptSessions, Views.PatientTyping_AllEpilepsy);
+fprintf('All-epilepsy pairs: %d, patients: %d\n', ...
+    height(PairTable_Full), numel(unique(PairTable_Full.Patient)));
+
 %% ======================= FIT MODELS =======================
-MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
+MMR = fit_mixed_effects_models(PairTable, PairTable_Full, nBoot, alpha);
 
 %% ======================= FIGURE 1 =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
@@ -562,12 +568,13 @@ end
 %% MIXED EFFECTS MODELS
 %% =====================================================================
 
-function MMR = fit_mixed_effects_models(PairTable, nBoot, alpha)
-% PairTable — canonical-subtype patients only
-if nargin < 2, nBoot = 0;    end
-if nargin < 3, alpha = 0.05; end
+function MMR = fit_mixed_effects_models(PairTable, PairTable_Full, nBoot, alpha)
+% PairTable      — canonical-subtype patients only (for M1-M3)
+% PairTable_Full — all epilepsy patients, no subtype restriction (for M4-M6)
+if nargin < 3, nBoot = 0;    end
+if nargin < 4, alpha = 0.05; end
 
-%% ---- MODEL TABLE ----
+%% ---- TABLE A: canonical subtype patients (M1-M3) ----
 canonical3 = ["Frontal","General","Temporal"];
 
 keepMask = ismember(string(PairTable.EpiType3), canonical3) & ...
@@ -585,9 +592,26 @@ T.LagDirection(T.SignedLag_years == 0) = 1;
 T.EpiType3_cat = reordercats(categorical(string(T.EpiType3), canonical3), ...
     ["Temporal","Frontal","General"]);
 
-fprintf('[Model table] %d pairs, %d patients\n', height(T), numel(unique(T.Patient)));
+fprintf('[Model table A - with subtypes] %d pairs, %d patients\n', ...
+    height(T), numel(unique(T.Patient)));
+
+%% ---- TABLE B: all epilepsy patients, no subtype restriction (M4-M6) ----
+keepMask_full = isfinite(PairTable_Full.LogSpikesPerHour) & ...
+                isfinite(PairTable_Full.SignedLag_years)  & ...
+                isfinite(PairTable_Full.HasSz);
+T_full = PairTable_Full(keepMask_full, :);
+
+T_full.HasSz_bin    = double(T_full.HasSz == 1);
+T_full.LogSzFreq    = log(T_full.SzFreq + EPS_SZ);
+T_full.AbsLag_years = abs(T_full.SignedLag_years);
+T_full.LagDirection = sign(T_full.SignedLag_years);
+T_full.LagDirection(T_full.SignedLag_years == 0) = 1;
+
+fprintf('[Model table B - no subtypes] %d pairs, %d patients\n', ...
+    height(T_full), numel(unique(T_full.Patient)));
 
 %% ---- MODEL FORMULAS ----
+% With subtypes (M1-M3)
 formula_M1 = ['HasSz_bin ~ ' ...
     'LogSpikesPerHour * AbsLag_years + ' ...
     'LogSpikesPerHour * LagDirection + ' ...
@@ -595,6 +619,23 @@ formula_M1 = ['HasSz_bin ~ ' ...
 formula_M2 = ['HasSz_bin ~ ' ...
     'LogSpikesPerHour + AbsLag_years + LagDirection + ' ...
     'EpiType3_cat + (1|PatientID)'];
+formula_M3 = ['LogSzFreq ~ ' ...
+    'LogSpikesPerHour * AbsLag_years + ' ...
+    'LogSpikesPerHour * LagDirection + ' ...
+    'EpiType3_cat + (1|PatientID)'];
+
+% No subtypes (M4-M6)
+formula_M4 = ['HasSz_bin ~ ' ...
+    'LogSpikesPerHour * AbsLag_years + ' ...
+    'LogSpikesPerHour * LagDirection + ' ...
+    '(1|PatientID)'];
+formula_M5 = ['HasSz_bin ~ ' ...
+    'LogSpikesPerHour + AbsLag_years + LagDirection + ' ...
+    '(1|PatientID)'];
+formula_M6 = ['LogSzFreq ~ ' ...
+    'LogSpikesPerHour * AbsLag_years + ' ...
+    'LogSpikesPerHour * LagDirection + ' ...
+    '(1|PatientID)'];
 
 %% ---- FIT MODELS ----
 glme_opts = {'Distribution','Binomial','Link','logit', ...
@@ -608,18 +649,41 @@ fprintf('\nFitting M2 (logistic + subtypes, no interactions)...\n');
 try; mdl_M2 = fitglme(T, formula_M2, glme_opts{:}); fprintf('M2 converged.\n'); disp(mdl_M2);
 catch ME; fprintf('M2 failed: %s\n', ME.message); mdl_M2 = []; end
 
-%% ---- LRT ----
-fprintf('\n=== LIKELIHOOD RATIO TEST ===\n');
-lrt_p = NaN;
+fprintf('\nFitting M3 (linear + subtypes + interactions)...\n');
+try; mdl_M3 = fitlme(T, formula_M3, 'FitMethod','REML'); fprintf('M3 converged.\n'); disp(mdl_M3);
+catch ME; fprintf('M3 failed: %s\n', ME.message); mdl_M3 = []; end
+
+fprintf('\nFitting M4 (logistic, no subtypes + interactions)...\n');
+try; mdl_M4 = fitglme(T_full, formula_M4, glme_opts{:}); fprintf('M4 converged.\n'); disp(mdl_M4);
+catch ME; fprintf('M4 failed: %s\n', ME.message); mdl_M4 = []; end
+
+fprintf('\nFitting M5 (logistic, no subtypes, no interactions)...\n');
+try; mdl_M5 = fitglme(T_full, formula_M5, glme_opts{:}); fprintf('M5 converged.\n'); disp(mdl_M5);
+catch ME; fprintf('M5 failed: %s\n', ME.message); mdl_M5 = []; end
+
+fprintf('\nFitting M6 (linear, no subtypes + interactions)...\n');
+try; mdl_M6 = fitlme(T_full, formula_M6, 'FitMethod','REML'); fprintf('M6 converged.\n'); disp(mdl_M6);
+catch ME; fprintf('M6 failed: %s\n', ME.message); mdl_M6 = []; end
+
+%% ---- LRTs ----
+fprintf('\n=== LIKELIHOOD RATIO TESTS ===\n');
+lrt_p_A = NaN; lrt_p_B = NaN;
+
 if ~isempty(mdl_M1) && ~isempty(mdl_M2)
-    fprintf('\nLRT: M1 vs M2 (tests both interactions jointly)\n');
-    lrt = compare(mdl_M2, mdl_M1); disp(lrt);
-    lrt_p = lrt.pValue(2);
+    fprintf('\nLRT A: M1 vs M2 (interactions, with-subtype patients)\n');
+    lrt_A = compare(mdl_M2, mdl_M1); disp(lrt_A);
+    lrt_p_A = lrt_A.pValue(2);
+end
+
+if ~isempty(mdl_M4) && ~isempty(mdl_M5)
+    fprintf('\nLRT B: M4 vs M5 (interactions, no-subtype restriction)\n');
+    lrt_B = compare(mdl_M5, mdl_M4); disp(lrt_B);
+    lrt_p_B = lrt_B.pValue(2);
 end
 
 %% ---- FIXED EFFECTS TABLES ----
 fprintf('\n=== FIXED EFFECTS ===\n');
-T_fe1=[]; T_fe2=[];
+T_fe1=[]; T_fe2=[]; T_fe3=[]; T_fe4=[]; T_fe5=[]; T_fe6=[];
 
 if ~isempty(mdl_M1)
     [b,bn,s] = fixedEffects(mdl_M1, 'Alpha', alpha);
@@ -631,31 +695,63 @@ if ~isempty(mdl_M2)
     T_fe2 = make_fe_table_logistic(bn, b, s);
     fprintf('\nM2 (logistic + subtypes, no interactions):\n'); disp(T_fe2);
 end
+if ~isempty(mdl_M3)
+    [b,bn,s] = fixedEffects(mdl_M3, 'Alpha', alpha);
+    T_fe3 = table(string(bn.Name), b, s.SE, s.tStat, s.pValue, ...
+        'VariableNames',{'Term','Beta','SE','t','p'});
+    fprintf('\nM3 (linear + subtypes + interactions):\n'); disp(T_fe3);
+end
+if ~isempty(mdl_M4)
+    [b,bn,s] = fixedEffects(mdl_M4, 'Alpha', alpha);
+    T_fe4 = make_fe_table_logistic(bn, b, s);
+    fprintf('\nM4 (logistic, no subtypes + interactions):\n'); disp(T_fe4);
+end
+if ~isempty(mdl_M5)
+    [b,bn,s] = fixedEffects(mdl_M5, 'Alpha', alpha);
+    T_fe5 = make_fe_table_logistic(bn, b, s);
+    fprintf('\nM5 (logistic, no subtypes, no interactions):\n'); disp(T_fe5);
+end
+if ~isempty(mdl_M6)
+    [b,bn,s] = fixedEffects(mdl_M6, 'Alpha', alpha);
+    T_fe6 = table(string(bn.Name), b, s.SE, s.tStat, s.pValue, ...
+        'VariableNames',{'Term','Beta','SE','t','p'});
+    fprintf('\nM6 (linear, no subtypes + interactions):\n'); disp(T_fe6);
+end
 
-%% ---- BOOTSTRAP (M1 only) ----
-[T_boot1, boot_betas1] = run_bootstrap(T, mdl_M1, formula_M1, nBoot, alpha, 'M1');
+%% ---- BOOTSTRAP (M1 and M4 only — primary logistic models) ----
+[T_boot1, boot_betas1] = run_bootstrap(T,      mdl_M1, formula_M1, nBoot, alpha, 'M1');
+[T_boot4, boot_betas4] = run_bootstrap(T_full, mdl_M4, formula_M4, nBoot, alpha, 'M4');
+[T_boot3, boot_betas3] = run_bootstrap_lme(T,      mdl_M3, formula_M3, nBoot, alpha, 'M3');
+[T_boot6, boot_betas6] = run_bootstrap_lme(T_full, mdl_M6, formula_M6, nBoot, alpha, 'M6');
 
 if ~isempty(boot_betas1) && size(boot_betas1,1) > 10
     plot_bootstrap_diagnostics(boot_betas1, mdl_M1, 'M1');
 end
+if ~isempty(boot_betas4) && size(boot_betas4,1) > 10
+    plot_bootstrap_diagnostics(boot_betas4, mdl_M4, 'M4');
+end
 
 %% ---- BUNDLE ----
-MMR.ModelTable  = T;
-MMR.mdl_M1      = mdl_M1;
-MMR.mdl_M2      = mdl_M2;
-MMR.FE_M1       = T_fe1;
-MMR.FE_M2       = T_fe2;
-MMR.BootstrapBetas1 = boot_betas1;
-MMR.BootstrapTable1 = T_boot1;
-MMR.LRT_p       = lrt_p;   % M1 vs M2, chi^2(2)
+MMR.ModelTable      = T;
+MMR.ModelTable_Full = T_full;
 
-fprintf('\nDone. Primary model: M1 (logistic + subtypes + interactions).\n');
-if ~isempty(T_boot1)
-    fprintf('Bootstrap CIs in MMR.BootstrapTable1\n');
-else
-    fprintf('No bootstrap CIs (nBoot=0).\n');
+MMR.mdl_M1 = mdl_M1;  MMR.mdl_M2 = mdl_M2;  MMR.mdl_M3 = mdl_M3;
+MMR.mdl_M4 = mdl_M4;  MMR.mdl_M5 = mdl_M5;  MMR.mdl_M6 = mdl_M6;
+
+MMR.FE_M1 = T_fe1;  MMR.FE_M2 = T_fe2;  MMR.FE_M3 = T_fe3;
+MMR.FE_M4 = T_fe4;  MMR.FE_M5 = T_fe5;  MMR.FE_M6 = T_fe6;
+
+MMR.BootstrapBetas1 = boot_betas1;  MMR.BootstrapTable1 = T_boot1;
+MMR.BootstrapBetas4 = boot_betas4;  MMR.BootstrapTable4 = T_boot4;
+MMR.BootstrapTable3 = T_boot3;      MMR.BootstrapBetas3 = boot_betas3;
+MMR.BootstrapTable6 = T_boot6;      MMR.BootstrapBetas6 = boot_betas6;
+
+MMR.LRT_p_A = lrt_p_A;   % M1 vs M2, chi^2(2)
+MMR.LRT_p_B = lrt_p_B;   % M4 vs M5, chi^2(2)
+
+fprintf('\nDone. Primary models: M1 (with subtypes) and M4 (no subtypes).\n');
 end
-end
+
 
 function T_fe = make_fe_table_logistic(bn, b, s)
 T_fe = table(string(bn.Name), b, s.SE, s.tStat, s.pValue, ...
@@ -1325,6 +1421,7 @@ end
 %% =====================================================================
 %% TABLE S1
 %% =====================================================================
+
 function write_tableS1(MMR, outPath)
 
 function disp = clean_term(raw)
@@ -1344,10 +1441,15 @@ rows = {};
 model_specs = {
     'M1','M1 (logistic, subtypes, interactions)',    'logistic', MMR.FE_M1, MMR.BootstrapTable1;
     'M2','M2 (logistic, subtypes, no interactions)', 'logistic', MMR.FE_M2, [];
+    'M3','M3 (linear, subtypes, interactions)',      'linear',   MMR.FE_M3, MMR.BootstrapTable3;
+    'M4','M4 (logistic, no subtypes, interactions)', 'logistic', MMR.FE_M4, MMR.BootstrapTable4;
+    'M5','M5 (logistic, no subtypes, no interactions)','logistic',MMR.FE_M5, [];
+    'M6','M6 (linear, no subtypes, interactions)',   'linear',   MMR.FE_M6, MMR.BootstrapTable6;
 };
 
 for mi = 1:size(model_specs,1)
     model_label = model_specs{mi,2};
+    is_logistic = strcmp(model_specs{mi,3},'logistic');
     FE  = model_specs{mi,4};
     BT  = model_specs{mi,5};
     if isempty(FE), continue; end
@@ -1355,7 +1457,7 @@ for mi = 1:size(model_specs,1)
     for i = 1:height(FE)
         term = string(FE.Term(i));
         if term=="(Intercept)", continue; end
-        p_val = FE.p(i);
+        p_val = FE.p(i);   % Wald fallback
         if ~isempty(BT)
             bt_row_p = BT(string(BT.Term)==term, :);
             if ~isempty(bt_row_p) && ismember('Boot_p', bt_row_p.Properties.VariableNames)
@@ -1363,22 +1465,36 @@ for mi = 1:size(model_specs,1)
             end
         end
 
-        est_pt = FE.OR(i);
-        if ~isempty(BT)
-            bt_row = BT(string(BT.Term)==term,:);
-            if ~isempty(bt_row)
-                ci_lo=bt_row.OR_CI_lo; ci_hi=bt_row.OR_CI_hi; ci_src='Bootstrap';
+        if is_logistic
+            est_pt = FE.OR(i);
+            if ~isempty(BT)
+                bt_row = BT(string(BT.Term)==term,:);
+                if ~isempty(bt_row)
+                    ci_lo=bt_row.OR_CI_lo; ci_hi=bt_row.OR_CI_hi; ci_src='Bootstrap';
+                else
+                    ci_lo=FE.OR_lo(i); ci_hi=FE.OR_hi(i); ci_src='Laplace';
+                end
             else
                 ci_lo=FE.OR_lo(i); ci_hi=FE.OR_hi(i); ci_src='Laplace';
             end
+            est_str=sprintf('%.3f',est_pt); lo_str=sprintf('%.3f',ci_lo); hi_str=sprintf('%.3f',ci_hi);
         else
-            ci_lo=FE.OR_lo(i); ci_hi=FE.OR_hi(i); ci_src='Laplace';
+            est_pt = FE.Beta(i); se = FE.SE(i);
+            if ~isempty(BT)
+                bt_row = BT(string(BT.Term)==term,:);
+                if ~isempty(bt_row)
+                    ci_lo=bt_row.Boot_CI_lo; ci_hi=bt_row.Boot_CI_hi; ci_src='Bootstrap';
+                else
+                    ci_lo=est_pt-1.96*se; ci_hi=est_pt+1.96*se; ci_src='Laplace';
+                end
+            else
+                ci_lo=est_pt-1.96*se; ci_hi=est_pt+1.96*se; ci_src='Laplace';
+            end
+            est_str=sprintf('%.3f',est_pt); lo_str=sprintf('%.3f',ci_lo); hi_str=sprintf('%.3f',ci_hi);
         end
 
         if p_val<0.001, p_str='<0.001'; elseif p_val<0.01, p_str=sprintf('%.3f',p_val); else, p_str=sprintf('%.2f',p_val); end
-        rows(end+1,:) = {model_label, clean_term(char(term)), ...
-            sprintf('%.3f',est_pt), sprintf('%.3f',ci_lo), sprintf('%.3f',ci_hi), ...
-            ci_src, p_str}; %#ok<AGROW>
+        rows(end+1,:) = {model_label, clean_term(char(term)), est_str, lo_str, hi_str, ci_src, p_str}; %#ok<AGROW>
     end
 end
 
@@ -1387,8 +1503,6 @@ T_out = cell2table(rows, 'VariableNames', ...
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 writetable(T_out, outPath);
 end
-
-
 %% =====================================================================
 %% HTML RESULTS
 %% =====================================================================
@@ -1495,7 +1609,7 @@ fprintf(fid,['<p>Seizure frequency varies over time within individuals, '...
     'the spike-seizure association to vary with the temporal distance between EEG and visit (Supplemental Figure 3). A likelihood ratio '...
     'test confirmed that these interactions '...
     'jointly improved model fit over a model without them (&chi;&sup2;(2), %s). </p>\n'], ...
-    n_pairs, n_pats, format_p_html(MMR.LRT_p));
+    n_pairs, n_pats, format_p_html(MMR.LRT_p_A));
 
 fprintf(fid,'<p>Higher spike rates were associated with higher odds of reporting seizures at a clinic visit (OR=%.2f [95%% CI %.2f-%.2f], %s; Fig. 3D). ', ...
     r_spike.OR, r_spike.OR_CI_lo, r_spike.OR_CI_hi, format_p_html(getP('LogSpikesPerHour')));
@@ -1520,6 +1634,7 @@ fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure
 fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ significantly (OR=%.2f [%.2f-%.2f], %s). ', ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
+fprintf(fid,'Results were consistent when using log-transformed continuous seizure frequency as the outcome (Table S1). ');
 fprintf(fid,['Together, these results confirm a positive spike rate–seizure association '...
     'and suggest it is strongest when the EEG is obtained close to the clinic visit, '...
     'consistent with spike rates tracking within-individual seizure burden over time.</p>\n']);
@@ -1854,8 +1969,132 @@ d=(2*U1/(n1*n2))-1;
 end
 
 
+function [T_boot, boot_betas] = run_bootstrap_lme(T, mdl, formula, nBoot, alpha, label)
+T_boot     = [];
+boot_betas = [];
+if isempty(mdl) || nBoot == 0, return; end
+
+fprintf('\nBootstrapping %s (%d iterations)...\n', label, nBoot);
+patients   = unique(T.PatientID);
+nPat       = numel(patients);
+nFixed     = size(fixedEffects(mdl), 1);
+boot_betas = nan(nBoot, nFixed);
+
+parfor b = 1:nBoot
+    idx      = randi(nPat, nPat, 1);
+    bootPats = patients(idx);
+    Tboot    = cell(nPat, 1);
+    for k = 1:nPat
+        Tboot{k} = T(T.PatientID == bootPats(k), :);
+        Tboot{k}.PatientID = categorical(repmat(k, height(Tboot{k}), 1));
+    end
+    Tboot = vertcat(Tboot{:});
+    try
+        mboot = fitlme(Tboot, formula, 'FitMethod','REML');
+        boot_betas(b,:) = fixedEffects(mboot)';
+    catch
+    end
+end
+
+converged  = all(isfinite(boot_betas), 2);
+boot_betas = boot_betas(converged, :);
+fprintf('%s bootstrap: %d/%d converged (%.1f%%)\n', ...
+    label, sum(converged), nBoot, 100*mean(converged));
+
+ci_lo = prctile(boot_betas, 100*(alpha/2),   1);
+ci_hi = prctile(boot_betas, 100*(1-alpha/2), 1);
+[beta_obs, betanames_obs] = fixedEffects(mdl);
+
+% Bootstrap two-tailed p-value
+boot_p = nan(numel(beta_obs), 1);
+for k = 1:numel(beta_obs)
+    p_lo = mean(boot_betas(:,k) <= 0);
+    p_hi = mean(boot_betas(:,k) >= 0);
+    boot_p(k) = min(2 * min(p_lo, p_hi), 1);
+end
+
+T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), boot_p, ...
+    'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','Boot_p'});
+fprintf('%s bootstrapped betas:\n', label); disp(T_boot);
+end
 
 
+function PairTable = build_eeg_visit_pairs_nosubtype(Vuniq, SessionLevelSpikeRates, ...
+    ReportForKeptSessions, PatientTyping_AllEpilepsy)
+%% All-epilepsy patients — no EpiType3 restriction
+
+EEG_raw = ReportForKeptSessions.start_time_deid;
+if isdatetime(EEG_raw), EEG_dt = EEG_raw;
+else, EEG_dt = datetime(strtrim(string(EEG_raw)), 'InputFormat', "yyyy-MM-dd'T'HH:mm:ss");
+end
+
+EEG_dates = table(double(ReportForKeptSessions.Patient), ...
+    double(ReportForKeptSessions.Session), EEG_dt, ...
+    'VariableNames',{'Patient','Session','EEG_Date'});
+EEG_dates = EEG_dates(~isnat(EEG_dates.EEG_Date), :);
+
+EEG_tbl = innerjoin(EEG_dates, ...
+    SessionLevelSpikeRates(:,{'Patient','Session','SpikesPerHour'}), ...
+    'Keys',{'Patient','Session'});
+
+% Use all epilepsy patients — join only to get Patient list, no EpiType3
+AllEpiPatients = unique(PatientTyping_AllEpilepsy.Patient);
+Vep = Vuniq(ismember(Vuniq.Patient, AllEpiPatients), {'Patient','VisitDate','Freq_R1','HasSz'});
+
+patients  = intersect(unique(EEG_tbl.Patient), unique(Vep.Patient));
+nEstimate = 0;
+for i = 1:numel(patients)
+    p = patients(i);
+    nEstimate = nEstimate + sum(EEG_tbl.Patient==p) * sum(Vep.Patient==p);
+end
+
+Patient_out       = nan(nEstimate,1);
+Session_out       = nan(nEstimate,1);
+VisitDate_out     = NaT(nEstimate,1);
+SpikesPerHour_out = nan(nEstimate,1);
+SzFreq_out        = nan(nEstimate,1);
+HasSz_out         = nan(nEstimate,1);
+SignedLag_out     = nan(nEstimate,1);
+
+row = 0;
+for i = 1:numel(patients)
+    p        = patients(i);
+    eeg_rows = EEG_tbl(EEG_tbl.Patient==p, :);
+    vis_rows = Vep(Vep.Patient==p, :);
+    for e = 1:height(eeg_rows)
+        for v = 1:height(vis_rows)
+            row = row + 1;
+            Patient_out(row)       = p;
+            Session_out(row)       = eeg_rows.Session(e);
+            VisitDate_out(row)     = vis_rows.VisitDate(v);
+            SpikesPerHour_out(row) = eeg_rows.SpikesPerHour(e);
+            SzFreq_out(row)        = vis_rows.Freq_R1(v);
+            HasSz_out(row)         = vis_rows.HasSz(v);
+            SignedLag_out(row)     = days(vis_rows.VisitDate(v) - eeg_rows.EEG_Date(e));
+        end
+    end
+end
+
+PairTable = table(Patient_out(1:row), Session_out(1:row), VisitDate_out(1:row), ...
+    SpikesPerHour_out(1:row), SzFreq_out(1:row), HasSz_out(1:row), ...
+    SignedLag_out(1:row), ...
+    'VariableNames',{'Patient','Session','VisitDate','SpikesPerHour','SzFreq', ...
+                     'HasSz','SignedLag_days'});
+
+PairTable.EEG_ID = categorical(string(PairTable.Patient) + "_" + string(PairTable.Session));
+
+keepMask  = isfinite(PairTable.SpikesPerHour) & isfinite(PairTable.SzFreq) & ...
+            isfinite(PairTable.SignedLag_days);
+n_before  = height(PairTable);
+PairTable = PairTable(keepMask,:);
+fprintf('[build_eeg_visit_pairs_nosubtype] %d patients, %d pairs (%d removed)\n', ...
+    numel(patients), height(PairTable), n_before-height(PairTable));
+
+EPS_SPIKE = 1e-3;
+PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE);
+PairTable.SignedLag_years  = PairTable.SignedLag_days / 365.25;
+PairTable.PatientID        = categorical(PairTable.Patient);
+end
 
 function p = get_p_preferred(FE, BT, nm)
 % Use bootstrap p if available, otherwise fall back to Wald p from FE table
