@@ -38,7 +38,7 @@ NESD_LABEL        = "Non-Epileptic Seizure Disorder";
 badTypes          = lower(["Uncertain if Epilepsy","Unknown or MRN not found",""]);
 canonical3        = ["General","Temporal","Frontal"];
 
-EPS_RATE       = 30e-3;
+EPS_RATE       = 30e-3; % How much epsilon to add to zero spike rates so it doesn't screw up log scale
 Y_ZERO         = log10(EPS_RATE);
 Y_LIMS         = [-2 4];
 TITLE_Y_OFFSET = 0.02;
@@ -74,21 +74,21 @@ require_cols(ReportTable, ...
     "ReportTable");
 
 %% ======================= FILTER =======================
-ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits);
-[SpikeSummaryTable, ReportTable] = filter_outpatient_routine(SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS);
+ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits); % only allow outpatient clinic visits
+[SpikeSummaryTable, ReportTable] = filter_outpatient_routine(SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS); % only allow outpatient routine EEGs
 
 assert_unique_keys(SpikeSummaryTable, "Patient","Session","SpikeSummaryTable");
 assert_unique_keys(ReportTable, "patient_id","session_number","ReportTable");
 
 %% ======================= BUILD COHORT =======================
-Vuniq            = build_visit_level_table_R1(ReportTable);
-PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3);
+Vuniq            = build_visit_level_table_R1(ReportTable); % all unique visits
+PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3); % patient epilepsy types
 SzFreqPerPatient = build_patient_seizure_metrics(Vuniq);
 
 Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
     SzFreqPerPatient, NESD_LABEL, badTypes, canonical3);
 
-%% ======================= BUILD PAIR TABLE =======================
+%% ======================= BUILD PAIR TABLE FOR MODEL =======================
 % Canonical-subtype patients only
 PairTable = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
     Views.ReportForKeptSessions, Views.PatientTypingFiltered);
@@ -121,7 +121,7 @@ fprintf('Saved Fig S1: %s\n', figS1_out);
 FigMain = make_model_figure(MMR, figMain_out);
 
 % Supplemental
-figSupLag_out = '../output/FigSupLag.png';
+figSupLag_out = '../output/FigSupLag.png'; % Fig S3
 FigSupLag = make_figSup_lag(MMR, Vuniq, Views.ReportForKeptSessions, figSupLag_out);
 
 %% ======================= FIG S2 =======================
@@ -634,6 +634,7 @@ end
 
 %% ---- BOOTSTRAP (M1 only) ----
 [T_boot1, boot_betas1] = run_bootstrap(T, mdl_M1, formula_M1, nBoot, alpha, 'M1');
+[T_boot2, boot_betas2] = run_bootstrap(T, mdl_M2, formula_M2, nBoot, alpha, 'M2');
 
 if ~isempty(boot_betas1) && size(boot_betas1,1) > 10
     plot_bootstrap_diagnostics(boot_betas1, mdl_M1, 'M1');
@@ -647,6 +648,8 @@ MMR.FE_M1       = T_fe1;
 MMR.FE_M2       = T_fe2;
 MMR.BootstrapBetas1 = boot_betas1;
 MMR.BootstrapTable1 = T_boot1;
+MMR.BootstrapBetas2 = boot_betas2;
+MMR.BootstrapTable2 = T_boot2;
 MMR.LRT_p       = lrt_p;   % M1 vs M2, chi^2(2)
 
 fprintf('\nDone. Primary model: M1 (logistic + subtypes + interactions).\n');
@@ -1110,7 +1113,7 @@ set_log10_ticks(axA,'y',EPS_FREQ,Y_LIM_FREQ);
 ylabel(axA,'Median sz/month (log scale)','FontSize',FONT_SIZE,'Color',COL_FREQ);
 axA.YAxis(2).Color = COL_FREQ;
 
-xlabel(axA,'Years since Jan 2000 (calendar anchor)','FontSize',FONT_SIZE);
+xlabel(axA,'Years after first visit','FontSize',FONT_SIZE);
 th = title(axA,'A. Seizure burden tends to decrease over time', ...
     'FontSize',FONT_SIZE,'FontWeight','bold');
 th.Units = 'normalized'; th.Position(2) = th.Position(2) + 0.02;
@@ -1343,7 +1346,7 @@ rows = {};
 
 model_specs = {
     'M1','M1 (logistic, subtypes, interactions)',    'logistic', MMR.FE_M1, MMR.BootstrapTable1;
-    'M2','M2 (logistic, subtypes, no interactions)', 'logistic', MMR.FE_M2, [];
+    'M2','M2 (logistic, subtypes, no interactions)', 'logistic', MMR.FE_M2, MMR.BootstrapTable2;
 };
 
 for mi = 1:size(model_specs,1)
@@ -1515,7 +1518,7 @@ fprintf(fid,['%.2f at a 6-month lag, %.2f at 2 years, and %.2f at 4 years ' ...
 fprintf(fid,['Spike rates from EEGs obtained before versus after a clinic '...
     'visit were similarly associated with seizure occurrence  (interaction OR=%.3f [%.3f-%.3f], %s). '], ...
     r_int_dir.OR, r_int_dir.OR_CI_lo, r_int_dir.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:LagDirection')));
-fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), consistent with gradual clinical improvement over time (Supplemental Figure 3). ', ...
+fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), consistent with gradual clinical improvement over time (Fig. S3). ', ...
     r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('LagDirection')));
 fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ significantly (OR=%.2f [%.2f-%.2f], %s). ', ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
