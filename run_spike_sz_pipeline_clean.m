@@ -38,7 +38,7 @@ NESD_LABEL        = "Non-Epileptic Seizure Disorder";
 badTypes          = lower(["Uncertain if Epilepsy","Unknown or MRN not found",""]);
 canonical3        = ["General","Temporal","Frontal"];
 
-EPS_RATE       = 30e-3; % How much epsilon to add to zero spike rates so it doesn't screw up log scale
+EPS_RATE       = 30e-3; % How much epsilon to add to zero spike rates so it doesn't screw up log scale on figures
 Y_ZERO         = log10(EPS_RATE);
 Y_LIMS         = [-2 4];
 TITLE_Y_OFFSET = 0.02;
@@ -175,6 +175,7 @@ exportgraphics(figH, outPath, 'Resolution', 300);
 end
 
 function R = filter_visit_arrays_by_type(R, allowable_visits)
+% Only allow outpatient clinic visits
 vt_raw_all = strtrim(string(R.visit_type));
 mask_null_only = (vt_raw_all == "[null]") | (vt_raw_all == "null");
 R.visit_type(mask_null_only)       = "[]";
@@ -229,12 +230,15 @@ fprintf('[Visit-type filter] %d -> %d visits (kept %.1f%%)\n', ...
 end
 
 function [S, R] = filter_outpatient_routine(S, R, durCol, MAX_ROUTINE_HOURS)
+% only allow outpatient routine EEGs
 nR0 = height(R); nS0 = height(S);
 
 acqStr   = lower(strtrim(string(R.acquired_on)));
 classStr = lower(strtrim(string(R.report_PATIENT_CLASS)));
 jayStr   = lower(strtrim(string(R.jay_in_or_out)));
 
+% it's outpatient if acquired at SPE or Radnor or if its listed as an
+% outpatient EEG
 isOutpt = contains(acqStr,"spe") | contains(acqStr,"radnor") | ...
           (classStr == "outpatient") | (jayStr == "out");
 
@@ -255,16 +259,18 @@ fprintf('[Outpatient+routine] Kept %d/%d spike rows, %d/%d report rows\n', ...
 end
 
 function Vuniq = build_visit_level_table_R1(R)
+% Make one row for each visit
 PV = table('Size',[0 4], 'VariableTypes',{'double','datetime','double','double'}, ...
     'VariableNames',{'Patient','VisitDate','Freq','HasSz'});
 
+% loop over eeg rows (each eeg row has all visits for that patient)
 for j = 1:height(R)
     pid = double(R.patient_id(j));
     ds  = strtrim(string(R.visit_dates_deid(j)));
     if ds=="[]" || ds=="", continue; end
-    d = datetime(string(jsondecode(char(ds))),'InputFormat','yyyy-MM-dd');
+    d = datetime(string(jsondecode(char(ds))),'InputFormat','yyyy-MM-dd'); % get dates of clinic visits
 
-    s = strtrim(string(R.sz_freqs(j)));
+    s = strtrim(string(R.sz_freqs(j))); % get sz frequencies
     s = regexprep(s,'null','NaN','ignorecase');
     v = double(jsondecode(char(s)));
     v(~isfinite(v)|v<0) = NaN;
@@ -281,6 +287,7 @@ for j = 1:height(R)
         'VariableNames', PV.Properties.VariableNames)]; %#ok<AGROW>
 end
 
+% collapse to unique patient-date combos
 [gv, pid_keys, date_keys] = findgroups(PV.Patient, PV.VisitDate);
 Freq_agg = splitapply(@(x) mean(x(isfinite(x)),'omitnan'), PV.Freq, gv);
 Has_agg  = splitapply(@max_hasSz, PV.HasSz, gv);
@@ -289,17 +296,18 @@ Vuniq = table(pid_keys, date_keys, Freq_agg, Has_agg, ...
     'VariableNames', {'Patient','VisitDate','Freq','HasSz'});
 Vuniq.Freq_R1 = Vuniq.Freq;
 mask_rule1 = ~isfinite(Vuniq.Freq_R1) & (Vuniq.HasSz==0);
-Vuniq.Freq_R1(mask_rule1) = 0;
+Vuniq.Freq_R1(mask_rule1) = 0; % set sz freq to be 0 if has sz = 0
 end
 
 function SzP = build_patient_seizure_metrics(Vuniq)
 [gp, pids] = findgroups(Vuniq.Patient);
-MeanSzFreq        = splitapply(@(x) mean(x,'omitnan'), Vuniq.Freq_R1, gp);
+MeanSzFreq        = splitapply(@(x) mean(x,'omitnan'), Vuniq.Freq_R1, gp); % get mean sz frequency per patient
 FracVisits_HasSz1 = splitapply(@local_frac_hasSz1, Vuniq.HasSz, gp);
 SzP = table(pids, MeanSzFreq, FracVisits_HasSz1, ...
     'VariableNames', {'Patient','MeanSzFreq','FracVisits_HasSz1'});
 end
 
+% determine epilepsy type
 function T = build_patient_typing_from_report(R, canonical3)
 pid   = double(R.patient_id);
 etype = strtrim(string(R.epilepsy_type));
@@ -480,10 +488,12 @@ end
 %% =====================================================================
 %% PAIR TABLE BUILDER
 %% =====================================================================
+% This builds the EEG-visit pair table that is the input to the mixed
+% effects model
 function PairTable = build_eeg_visit_pairs(Vuniq, SessionLevelSpikeRates, ...
     ReportForKeptSessions, PatientTyping)
-%% Canonical-subtype patients — includes EpiType3
 
+%% Get EEG table
 EEG_raw = ReportForKeptSessions.start_time_deid;
 if isdatetime(EEG_raw), EEG_dt = EEG_raw;
 else, EEG_dt = datetime(strtrim(string(EEG_raw)), 'InputFormat', "yyyy-MM-dd'T'HH:mm:ss");
@@ -498,10 +508,12 @@ EEG_tbl = innerjoin(EEG_dates, ...
     SessionLevelSpikeRates(:,{'Patient','Session','SpikesPerHour'}), ...
     'Keys',{'Patient','Session'});
 
+%% Get patient visit table
 Vtyped = innerjoin(Vuniq(:,{'Patient','VisitDate','Freq_R1','HasSz'}), ...
     PatientTyping(:,{'Patient','EpiType3'}), 'Keys','Patient');
 
-patients  = intersect(unique(EEG_tbl.Patient), unique(Vtyped.Patient));
+%% Estimate size of array to allow pre-allocation to speed it up
+patients  = intersect(unique(EEG_tbl.Patient), unique(Vtyped.Patient)); % find unique patient identifiers
 nEstimate = 0;
 for i = 1:numel(patients)
     p = patients(i);
@@ -517,13 +529,15 @@ HasSz_out         = nan(nEstimate,1);
 SignedLag_out     = nan(nEstimate,1);
 EpiType3_out      = strings(nEstimate,1);
 
+%% Fill up table
 row = 0;
+% loop over all patients
 for i = 1:numel(patients)
     p        = patients(i);
     eeg_rows = EEG_tbl(EEG_tbl.Patient==p, :);
     vis_rows = Vtyped(Vtyped.Patient==p, :);
-    for e = 1:height(eeg_rows)
-        for v = 1:height(vis_rows)
+    for e = 1:height(eeg_rows) % loop over all eegs for that patient
+        for v = 1:height(vis_rows) % loop over all visits for that patient
             row = row + 1;
             Patient_out(row)       = p;
             Session_out(row)       = eeg_rows.Session(e);
@@ -531,7 +545,7 @@ for i = 1:numel(patients)
             SpikesPerHour_out(row) = eeg_rows.SpikesPerHour(e);
             SzFreq_out(row)        = vis_rows.Freq_R1(v);
             HasSz_out(row)         = vis_rows.HasSz(v);
-            SignedLag_out(row)     = days(vis_rows.VisitDate(v) - eeg_rows.EEG_Date(e));
+            SignedLag_out(row)     = days(vis_rows.VisitDate(v) - eeg_rows.EEG_Date(e)); % positive if visit after eeg
             EpiType3_out(row)      = string(vis_rows.EpiType3(v));
         end
     end
@@ -553,7 +567,7 @@ fprintf('[build_eeg_visit_pairs] %d patients, %d pairs (%d removed)\n', ...
     numel(patients), height(PairTable), n_before-height(PairTable));
 
 EPS_SPIKE = 1e-3;
-PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE);
+PairTable.LogSpikesPerHour = log(PairTable.SpikesPerHour + EPS_SPIKE); % add tiny epsilon to not break log
 PairTable.SignedLag_years  = PairTable.SignedLag_days / 365.25;
 PairTable.PatientID        = categorical(PairTable.Patient);
 end
@@ -588,10 +602,14 @@ T.EpiType3_cat = reordercats(categorical(string(T.EpiType3), canonical3), ...
 fprintf('[Model table] %d pairs, %d patients\n', height(T), numel(unique(T.Patient)));
 
 %% ---- MODEL FORMULAS ----
+% Primary model, includes interactions between spike rate and abs lag and
+% spike rate and lag direction
 formula_M1 = ['HasSz_bin ~ ' ...
     'LogSpikesPerHour * AbsLag_years + ' ...
     'LogSpikesPerHour * LagDirection + ' ...
     'EpiType3_cat + (1|PatientID)'];
+
+% Alternate model, no interaction terms
 formula_M2 = ['HasSz_bin ~ ' ...
     'LogSpikesPerHour + AbsLag_years + LagDirection + ' ...
     'EpiType3_cat + (1|PatientID)'];
@@ -632,9 +650,9 @@ if ~isempty(mdl_M2)
     fprintf('\nM2 (logistic + subtypes, no interactions):\n'); disp(T_fe2);
 end
 
-%% ---- BOOTSTRAP (M1 only) ----
-[T_boot1, boot_betas1] = run_bootstrap(T, mdl_M1, formula_M1, nBoot, alpha, 'M1');
-[T_boot2, boot_betas2] = run_bootstrap(T, mdl_M2, formula_M2, nBoot, alpha, 'M2');
+%% ---- BOOTSTRAP ----
+[T_boot1, boot_betas1, nConv1, nTotal1] = run_bootstrap(T, mdl_M1, formula_M1, nBoot, alpha, 'M1');
+[T_boot2, boot_betas2, nConv2, nTotal2] = run_bootstrap(T, mdl_M2, formula_M2, nBoot, alpha, 'M2');
 
 if ~isempty(boot_betas1) && size(boot_betas1,1) > 10
     plot_bootstrap_diagnostics(boot_betas1, mdl_M1, 'M1');
@@ -651,6 +669,10 @@ MMR.BootstrapTable1 = T_boot1;
 MMR.BootstrapBetas2 = boot_betas2;
 MMR.BootstrapTable2 = T_boot2;
 MMR.LRT_p       = lrt_p;   % M1 vs M2, chi^2(2)
+MMR.BootstrapConvergence.M1_nConverged = nConv1;
+MMR.BootstrapConvergence.M1_nTotal     = nTotal1;
+MMR.BootstrapConvergence.M2_nConverged = nConv2;
+MMR.BootstrapConvergence.M2_nTotal     = nTotal2;
 
 fprintf('\nDone. Primary model: M1 (logistic + subtypes + interactions).\n');
 if ~isempty(T_boot1)
@@ -666,9 +688,11 @@ T_fe = table(string(bn.Name), b, s.SE, s.tStat, s.pValue, ...
     'VariableNames',{'Term','Beta','SE','t','p','OR','OR_lo','OR_hi'});
 end
 
-function [T_boot, boot_betas] = run_bootstrap(T, mdl, formula, nBoot, alpha, label)
+function [T_boot, boot_betas, nConverged, nTotal] = run_bootstrap(T, mdl, formula, nBoot, alpha, label)
 T_boot     = [];
 boot_betas = [];
+nConverged = 0;
+nTotal     = 0;
 if isempty(mdl) || nBoot == 0, return; end
 
 fprintf('\nBootstrapping %s (%d iterations)...\n', label, nBoot);
@@ -678,9 +702,12 @@ nFixed     = size(fixedEffects(mdl), 1);
 boot_betas = nan(nBoot, nFixed);
 
 parfor b = 1:nBoot
-    idx      = randi(nPat, nPat, 1);
+    idx      = randi(nPat, nPat, 1); % draw n patients with replacement
     bootPats = patients(idx);
     Tboot    = cell(nPat, 1);
+
+    % for each patient, copy all their rows over (so bootstrap at the
+    % PATIENT LEVEL)
     for k = 1:nPat
         Tboot{k} = T(T.PatientID == bootPats(k), :);
         Tboot{k}.PatientID = categorical(repmat(k, height(Tboot{k}), 1));
@@ -715,6 +742,9 @@ T_boot = table(string(betanames_obs.Name), beta_obs, ci_lo(:), ci_hi(:), ...
     exp(beta_obs), exp(ci_lo(:)), exp(ci_hi(:)), boot_p, ...
     'VariableNames',{'Term','Beta','Boot_CI_lo','Boot_CI_hi','OR','OR_CI_lo','OR_CI_hi','Boot_p'});
 fprintf('%s bootstrapped ORs:\n', label); disp(T_boot);
+nConverged = sum(converged);
+nTotal     = nBoot;
+
 end
 
 function plot_bootstrap_diagnostics(boot_betas, mdl, label)
@@ -1060,8 +1090,8 @@ for b = 1:nBins_sz
     if numel(vals_hz) >= 10
         bin_prop_sz(b) = mean(vals_hz);
         bin_n_sz(b)    = numel(vals_hz);
-        boot_p = nan(500,1);
-        for bb = 1:500
+        boot_p = nan(5000,1);
+        for bb = 1:5000
             boot_p(bb) = mean(vals_hz(randi(numel(vals_hz),numel(vals_hz),1)));
         end
         bin_lo_sz(b) = prctile(boot_p,2.5);
@@ -1069,8 +1099,8 @@ for b = 1:nBins_sz
     end
     if numel(vals_fr) >= 10
         bin_med_freq(b) = median(vals_fr,'omitnan');
-        boot_f = nan(500,1);
-        for bb = 1:500
+        boot_f = nan(5000,1);
+        for bb = 1:5000
             boot_f(bb) = median(vals_fr(randi(numel(vals_fr),numel(vals_fr),1)),'omitnan');
         end
         bin_lo_freq(b) = prctile(boot_f,2.5);
@@ -1526,6 +1556,23 @@ fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lo
 fprintf(fid,['Together, these results confirm a positive spike rate–seizure association '...
     'and suggest it is strongest when the EEG is obtained close to the clinic visit, '...
     'consistent with spike rates tracking within-individual seizure burden over time.</p>\n']);
+
+fprintf(fid,'<h2>Bootstrap diagnostics</h2>\n');
+if isfield(MMR,'BootstrapConvergence')
+    BC = MMR.BootstrapConvergence;
+    fprintf(fid,'<p>Primary model (M1): %d/%d bootstrap iterations converged (%.1f%%).</p>\n', ...
+        BC.M1_nConverged, BC.M1_nTotal, 100*BC.M1_nConverged/max(1,BC.M1_nTotal));
+    fprintf(fid,'<p>Alternate model (M2): %d/%d bootstrap iterations converged (%.1f%%).</p>\n', ...
+        BC.M2_nConverged, BC.M2_nTotal, 100*BC.M2_nConverged/max(1,BC.M2_nTotal));
+    if BC.M1_nConverged/max(1,BC.M1_nTotal) < 0.95
+        fprintf(fid,'<p><strong>Warning: M1 convergence rate is below 95%%. CIs may be unreliable.</strong></p>\n');
+    end
+    if BC.M2_nConverged/max(1,BC.M2_nTotal) < 0.95
+        fprintf(fid,'<p><strong>Warning: M2 convergence rate is below 95%%. CIs may be unreliable.</strong></p>\n');
+    end
+else
+    fprintf(fid,'<p>Bootstrap convergence information not available (nBoot=0).</p>\n');
+end
 
 fprintf(fid,'</body></html>\n');
 fclose(fid);
