@@ -75,8 +75,7 @@ require_cols(ReportTable, ...
 
 %% ======================= FILTER =======================
 ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits); % only allow outpatient clinic visits
-[SpikeSummaryTable, ReportTable, nPatientsTotal] = filter_outpatient_routine(...
-    SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS);
+[SpikeSummaryTable, ReportTable] = filter_outpatient_routine(SpikeSummaryTable, ReportTable, durCol, MAX_ROUTINE_HOURS); % only allow outpatient routine EEGs
 
 assert_unique_keys(SpikeSummaryTable, "Patient","Session","SpikeSummaryTable");
 assert_unique_keys(ReportTable, "patient_id","session_number","ReportTable");
@@ -87,7 +86,7 @@ PatientTypingAll = build_patient_typing_from_report(ReportTable, canonical3); % 
 SzFreqPerPatient = build_patient_seizure_metrics(Vuniq);
 
 Views = build_filtered_view(SpikeSummaryTable, ReportTable, PatientTypingAll, ...
-    SzFreqPerPatient, NESD_LABEL, badTypes, canonical3, nPatientsTotal);
+    SzFreqPerPatient, NESD_LABEL, badTypes, canonical3);
 
 %% ======================= BUILD PAIR TABLE FOR MODEL =======================
 % Canonical-subtype patients only
@@ -98,12 +97,6 @@ fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
 
 %% ======================= FIT MODELS =======================
 MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
-
-%% ======================= FLOW DIAGRAM =======================
-figFlow_out = '../output/FigFlow.png';
-FigFlow = make_flowchart_figure(Views, MMR);
-save_fig(FigFlow, figFlow_out);
-fprintf('Saved flow diagram: %s\n', figFlow_out);
 
 %% ======================= FIGURE 1 =======================
 [Fig1, Fig1Stats] = make_fig1_controls(Views, EPS_RATE, Y_ZERO, Y_LIMS, TITLE_Y_OFFSET, nBoot, alpha);
@@ -152,7 +145,7 @@ write_results_html(resultsHtml, Views, SzFreqPerPatient, Fig1Stats, ...
     rho_lo_main, rho_hi_main, subtype_ci_main, ...
     SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
     rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
-    Views.ReportForKeptSessions, MMR, Vuniq);
+    Views.ReportForKeptSessions, MMR);
 fprintf('Wrote HTML: %s\n', resultsHtml);
 
 
@@ -236,18 +229,16 @@ fprintf('[Visit-type filter] %d -> %d visits (kept %.1f%%)\n', ...
     total_before, total_after, 100*total_after/max(1,total_before));
 end
 
-
-function [S, R, nPatientsTotal] = filter_outpatient_routine(S, R, durCol, MAX_ROUTINE_HOURS)
+function [S, R] = filter_outpatient_routine(S, R, durCol, MAX_ROUTINE_HOURS)
 % only allow outpatient routine EEGs
 nR0 = height(R); nS0 = height(S);
-
-% Count total unique patients before any filtering
-nPatientsTotal = numel(unique(double(R.patient_id)));
 
 acqStr   = lower(strtrim(string(R.acquired_on)));
 classStr = lower(strtrim(string(R.report_PATIENT_CLASS)));
 jayStr   = lower(strtrim(string(R.jay_in_or_out)));
 
+% it's outpatient if acquired at SPE or Radnor or if its listed as an
+% outpatient EEG
 isOutpt = contains(acqStr,"spe") | contains(acqStr,"radnor") | ...
           (classStr == "outpatient") | (jayStr == "out");
 
@@ -266,7 +257,6 @@ R = innerjoin(R, OutptRoutineKeys, 'LeftKeys', {'patient_id','session_number'}, 
 fprintf('[Outpatient+routine] Kept %d/%d spike rows, %d/%d report rows\n', ...
     height(S), nS0, height(R), nR0);
 end
-
 
 function Vuniq = build_visit_level_table_R1(R)
 % Make one row for each visit
@@ -369,7 +359,7 @@ end
 %% =====================================================================
 
 function Views = build_filtered_view(SessionsFiltered, ReportIn, PatientTypingAll, ...
-    SzFreqPerPatient, NESD_LABEL, badTypes, canonical3, nPatientsTotal)
+    SzFreqPerPatient, NESD_LABEL, badTypes, canonical3)
 
 %% Join report to kept sessions
 SessKeys = unique(SessionsFiltered(:,{'Patient','Session'}));
@@ -380,7 +370,6 @@ ReportForKeptSessions.Session = double(ReportForKeptSessions.session_number);
 
 %% Patient-level mean spike rate + typing
 PatientsKept   = unique(double(SessionsFiltered.Patient));
-nAfterOutptRoutine  = numel(PatientsKept);  
 TypingFiltered = innerjoin(PatientTypingAll, ...
     table(PatientsKept,'VariableNames',{'Patient'}), 'Keys','Patient');
 
@@ -406,12 +395,6 @@ SzFreqFiltered = innerjoin(SzFreqPerPatient, ...
     table(PatientsKept,'VariableNames',{'Patient'}), 'Keys','Patient');
 EpPatients     = table(PatientLevelSpikeRates.Patient(IsEpilepsyMask), 'VariableNames',{'Patient'});
 SzFreqEpilepsy = innerjoin(SzFreqFiltered, EpPatients, 'Keys','Patient');
-
-
-% *** CAPTURE THESE BEFORE THE COHORT RESTRICTION ***
-nPatientsWithEpilepsy  = numel(unique(SzFreqEpilepsy.Patient));
-nPatientsWithSzFreq    = numel(unique(SzFreqEpilepsy.Patient(...
-    isfinite(SzFreqEpilepsy.MeanSzFreq))));
 
 CohortPatients = unique(SzFreqEpilepsy.Patient(isfinite(SzFreqEpilepsy.MeanSzFreq)));
 CohortTable    = table(CohortPatients, 'VariableNames',{'Patient'});
@@ -483,22 +466,6 @@ for i = 1:3
         p_pair(i) = ranksum(xa, xb, 'method','approx');
     end
 end
-
-%% Exclusion counts for flow diagram
-EC.nTotal                = nPatientsTotal; % starting
-EC.nAfterOutptRoutine    = nAfterOutptRoutine; % those with outpatient routine eegs
-EC.nExcludedNoEpilepsy   = nAfterOutptRoutine - nPatientsWithEpilepsy; % excluded for not having epilepsy
-EC.nExcludedNoSzFreq     = nPatientsWithEpilepsy - nPatientsWithSzFreq; % excluded for not having sz frequency
-EC.nFinalCohort          = numel(CohortPatients);
-
-% Sanity check: exclusions + final cohort must sum to post-filter total
-assert(EC.nExcludedNoEpilepsy + EC.nExcludedNoSzFreq + EC.nFinalCohort == EC.nAfterOutptRoutine, ...
-    'Flow count mismatch: %d + %d + %d = %d, expected %d', ...
-    EC.nExcludedNoEpilepsy, EC.nExcludedNoSzFreq, EC.nFinalCohort, ...
-    EC.nExcludedNoEpilepsy + EC.nExcludedNoSzFreq + EC.nFinalCohort, ...
-    EC.nAfterOutptRoutine);
-
-Views.ExclusionCounts = EC;
 
 %% Bundle
 Views.SessionsForFigures         = SessionsFiltered;
@@ -1358,30 +1325,6 @@ n_pats_abs = nnz(pat_spike_status=="absent");
 n_pats_unk = nnz(pat_spike_status=="unknown");
 n_pats_rs  = numel(pid_rs);
 
-%% Restrict Vuniq to primary cohort patients only
-Vuniq_cohort = Vuniq(ismember(Vuniq.Patient, AllPatients), :);
-
-%% Follow-up duration: first to last clinic visit per patient
-[gf, pidf] = findgroups(Vuniq_cohort.Patient);
-FollowupDays = splitapply(@(d) days(max(d) - min(d)), Vuniq_cohort.VisitDate, gf);
-FollowupYears = FollowupDays / 365.25;
-FollowupTable = innerjoin(table(AllPatients,'VariableNames',{'Patient'}), ...
-    table(pidf, FollowupYears,'VariableNames',{'Patient','FollowupYears'}), 'Keys','Patient');
-fu_med = median(FollowupTable.FollowupYears,'omitnan');
-fu_q   = prctile(FollowupTable.FollowupYears,[25,75]);
-
-%% % visits with documented seizure frequency per patient
-[gd, pidd] = findgroups(Vuniq_cohort.Patient);
-FracDocumented = splitapply(@(f) mean(isfinite(f)), Vuniq_cohort.Freq_R1, gd);
-FracDocTable = innerjoin(table(AllPatients,'VariableNames',{'Patient'}), ...
-    table(pidd, FracDocumented,'VariableNames',{'Patient','FracDocumented'}), 'Keys','Patient');
-doc_med = median(FracDocTable.FracDocumented,'omitnan') * 100;
-doc_q   = prctile(FracDocTable.FracDocumented,[25,75]) * 100;
-
-assert(numel(unique(Vuniq_cohort.Patient)) == N_total, ...
-    'Vuniq_cohort patient count (%d) does not match N_total (%d)', ...
-    numel(unique(Vuniq_cohort.Patient)), N_total);
-
 OutVar = {}; OutStat = {};
 OutVar{end+1,1}="Total N patients"; OutStat{end+1,1}=sprintf('%d',N_total);
 OutVar{end+1,1}="Age at first visit (years)"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',age_med,age_q(1),age_q(2));
@@ -1396,10 +1339,6 @@ OutVar{end+1,1}="    Generalized";   OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_ge
 OutVar{end+1,1}="    Other";         OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_other,100*n_other/max(1,n_epi));
 OutVar{end+1,1}="    Unknown";       OutStat{end+1,1}=sprintf('%d (%.1f%%)',n_subunk,100*n_subunk/max(1,n_epi));
 OutVar{end+1,1}="Number of clinic visits"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',vis_med,vis_q(1),vis_q(2));
-OutVar{end+1,1}="Follow-up duration (years)"; 
-OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',fu_med,fu_q(1),fu_q(2));
-OutVar{end+1,1}="Visits with documented seizure frequency"; 
-OutStat{end+1,1}=sprintf('%.1f%% (%.1f-%.1f)',doc_med,doc_q(1),doc_q(2));
 OutVar{end+1,1}="Number of EEGs"; OutStat{end+1,1}=sprintf('%.1f (%.1f-%.1f)',eeg_med,eeg_q(1),eeg_q(2));
 OutVar{end+1,1}="Mean seizure frequency (seizures/month)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sf_med,sf_q(1),sf_q(2),sf_lo,sf_hi);
 OutVar{end+1,1}="Mean spike rate (spikes/hour)"; OutStat{end+1,1}=sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]',sr_med,sr_q(1),sr_q(2),sr_lo,sr_hi);
@@ -1492,7 +1431,7 @@ function write_results_html(outPath, Views, SzFreqPerPatient, Fig1Stats, ...
     rho_lo_main, rho_hi_main, subtype_ci_main, ...
     SpearmanResults_S1, rs_all_S1, p_all_S1, n_all_S1, ...
     rho_lo_S1, rho_hi_S1, subtype_ci_S1, ...
-    ReportForKeptSessions, MMR, Vuniq)
+    ReportForKeptSessions, MMR)
 
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 fid = fopen(outPath,'w');
@@ -1511,50 +1450,15 @@ sr_vec = PL.MeanSpikeRate_perHour(isfinite(PL.MeanSpikeRate_perHour));
 sr_med = median(sr_vec,'omitnan');
 [~,sr_ci_lo,sr_ci_hi] = bootstrap_median_ci(sr_vec,5000,0.05);
 
-%% Follow-up duration and documentation rate (cohort patients only)
-AllPats   = unique(Views.PatientLevelSpikeRates.Patient);
-Vuniq_coh = Vuniq(ismember(Vuniq.Patient, AllPats), :);
-
-[gf, pidf] = findgroups(Vuniq_coh.Patient);
-fu_days  = splitapply(@(d) days(max(d)-min(d)), Vuniq_coh.VisitDate, gf);
-fu_years = fu_days / 365.25;
-FuTable  = innerjoin(table(AllPats,'VariableNames',{'Patient'}), ...
-    table(pidf, fu_years,'VariableNames',{'Patient','FU'}), 'Keys','Patient');
-fu_med = median(FuTable.FU,'omitnan');
-fu_q   = prctile(FuTable.FU, [25 75]);
-
-[gd, pidd] = findgroups(Vuniq_coh.Patient);
-frac_doc = splitapply(@(f) mean(isfinite(f)), Vuniq_coh.Freq_R1, gd);
-DocTable = innerjoin(table(AllPats,'VariableNames',{'Patient'}), ...
-    table(pidd, frac_doc,'VariableNames',{'Patient','FracDoc'}), 'Keys','Patient');
-doc_med = median(DocTable.FracDoc,'omitnan') * 100;
-doc_q   = prctile(DocTable.FracDoc, [25 75]) * 100;
-
-
 fprintf(fid,'<html><head><meta charset="UTF-8"><title>Results</title></head><body>\n');
 
 %% Cohort
 fprintf(fid,'<h2>Cohort summary</h2>\n');
-EC = Views.ExclusionCounts;
-fprintf(fid,['<p>Of %d patients with EEG data in the Penn Epilepsy Center database, ' ...
-    '%d were excluded because their EEG was not an outpatient routine recording of less than 4 hours, ' ...
-    '%d were excluded without an LLM-confirmed epilepsy diagnosis, and ' ...
-    '%d were excluded without a documented seizure frequency, yielding a final cohort of ' ...
-    '%d patients with %d EEGs (Fig. S1). ' ...
-    'Median follow-up from first to last clinic visit was %.1f years (IQR %.1f&ndash;%.1f). ' ...
-    'Across patients, a median of %.1f%% (IQR %.1f&ndash;%.1f%%) of clinic visits had a documented seizure frequency. ' ...
-    'Median [95%% CI] monthly seizure frequency was %1.2f [%1.2f-%1.2f], and median spikes/hour was %1.2f [%1.2f-%1.2f] (Table 1).</p>\n'], ...
-    EC.nTotal, ...
-    EC.nTotal - EC.nAfterOutptRoutine, ...
-    EC.nExcludedNoEpilepsy, ...
-    EC.nExcludedNoSzFreq, ...
-    N_total, n_eegs_all, ...
-    fu_med, fu_q(1), fu_q(2), ...
-    doc_med, doc_q(1), doc_q(2), ...
-    sf_med, sf_ci_lo, sf_ci_hi, ...
-    sr_med, sr_ci_lo, sr_ci_hi);
+fprintf(fid,'<p>We included %d patients (%d EEGs). Median [95%% CI] monthly seizure frequency was %1.2f [%1.2f-%1.2f], and median spikes/hour was %1.2f [%1.2f-%1.2f] (Table 1).</p>\n', ...
+    N_total, n_eegs_all, sf_med, sf_ci_lo, sf_ci_hi, sr_med, sr_ci_lo, sr_ci_hi);
+
 %% Figure 1
-fprintf(fid,'<h2>Spike rates by patient groups</h2>\n');
+fprintf(fid,'<h2>Spike rates by patient groups (Figure 1)</h2>\n');
 fprintf(fid,'<p>Spike rates were higher in EEGs with clinically-reported spikes (median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 1A). ', ...
     Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
     Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
@@ -1563,7 +1467,7 @@ fprintf(fid,'Spike rates differed across epilepsy subtypes (Kruskal-Wallis %s, &
     format_p_html(Fig1Stats.p_kw_C), Fig1Stats.eta2_kw_C);
 
 %% Figure 2
-fprintf(fid,'<h2>Spike rate and seizure frequency</h2>\n');
+fprintf(fid,'<h2>Spike rate and seizure frequency (Figure 2)</h2>\n');
 fprintf(fid,'<p>Spike rate and seizure frequency were positively correlated across all epilepsy patients (N=%d, &rho;=%.2f [95%% CI %.2f-%.2f], %s). ', ...
     n_all_main, rs_all_main, rho_lo_main, rho_hi_main, format_p_html(p_all_main));
 fprintf(fid,'Subtype-specific correlations were significant for generalized epilepsy (N=%d, &rho;=%.2f [%.2f-%.2f], Bonferroni-adjusted %s) and temporal lobe epilepsy (N=%d, &rho;=%.2f [%.2f-%.2f], %s), but not frontal lobe epilepsy (N=%d, &rho;=%.2f [%.2f-%.2f], %s; Fig. 2). ', ...
@@ -1584,13 +1488,13 @@ else
 end
 fprintf(fid,['When restricting to patients with non-zero spike rates and seizure frequencies, '...
     'results were similar, although the temporal epilepsy correlation was slightly smaller (&rho;=%.2f %s) '...
-    'and no longer significant in this subgroup (Fig. S2). '],row.Spearman_r, ci_str);
+    'and no longer significant in this subgroup (Fig. S1). '],row.Spearman_r, ci_str);
 
 
-fprintf(fid,'Patients with spikes on at least one EEG had higher mean seizure frequencies (Fig. S3).</p>\n');
+fprintf(fid,'Patients with spikes on at least one EEG had higher mean seizure frequencies (Fig. S2).</p>\n');
 
 %% Figure 3
-fprintf(fid,'<h2>Mixed effects model</h2>\n');
+fprintf(fid,'<h2>Mixed effects model (Figure 3)</h2>\n');
 
 if ~isempty(MMR.BootstrapTable1)
     BT = MMR.BootstrapTable1; ci_source = 'bootstrap';
@@ -1621,22 +1525,13 @@ fprintf(fid,['<p>Seizure frequency varies over time within individuals, '...
     'predicting a stronger spike-seizure association for clinic visits close in time to EEGs. '...
     'To test this, we fit logistic mixed effects models on all EEG-visit pairs for patients '...
     'with known epilepsy subtype (N=%d pairs, %d patients), with interaction terms allowing '...
-    'the spike-seizure association to vary with the temporal distance between EEG and visit (Fig. S4). A likelihood ratio '...
+    'the spike-seizure association to vary with the temporal distance between EEG and visit (Supplemental Figure 3). A likelihood ratio '...
     'test confirmed that these interactions '...
     'jointly improved model fit over a model without them (&chi;&sup2;(2), %s). </p>\n'], ...
     n_pairs, n_pats, format_p_html(MMR.LRT_p));
 
-% e^1 increase in spike rate = 2.718x increase in raw spike rate
-% OR corresponds to that fold-increase; express as percent
-pct_increase = (r_spike.OR - 1) * 100;
-fold_increase = exp(1);  % one unit on log scale = e-fold increase in raw rate
-
-fprintf(fid,['<p>Higher spike rates were associated with higher odds of reporting seizures at a clinic visit ' ...
-    '(OR=%.2f [95%% CI %.2f-%.2f], %s; Fig. 3D), implying that a %.1f-fold increase in spike rate ' ...
-    'is associated with %.0f%% higher odds of seizure reporting at a clinic visit. '], ...
-    r_spike.OR, r_spike.OR_CI_lo, r_spike.OR_CI_hi, format_p_html(getP('LogSpikesPerHour')), ...
-    fold_increase, pct_increase);
-
+fprintf(fid,'<p>Higher spike rates were associated with higher odds of reporting seizures at a clinic visit (OR=%.2f [95%% CI %.2f-%.2f], %s; Fig. 3D). ', ...
+    r_spike.OR, r_spike.OR_CI_lo, r_spike.OR_CI_hi, format_p_html(getP('LogSpikesPerHour')));
 fprintf(fid,['The spike-seizure association attenuated with greater EEG-visit distance, although the effect was small '...
     '(OR=%.3f [%.3f-%.3f], %s): e.g., the model-predicted OR for spike rate was '], ...
     r_int_prox.OR, r_int_prox.OR_CI_lo, r_int_prox.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:AbsLag_years')));
@@ -2021,152 +1916,4 @@ if ~isempty(BT) && ismember('Boot_p', BT.Properties.VariableNames)
         p = bt_row.Boot_p;
     end
 end
-end
-
-
-%% =====================================================================
-%% FLOW DIAGRAM
-%% =====================================================================
-
-function FigFlow = make_flowchart_figure(Views, MMR)
-
-EC        = Views.ExclusionCounts;
-n_subtype = numel(unique(MMR.ModelTable.Patient));
-n_pairs   = height(MMR.ModelTable);
-
-%% ---- Layout constants ----
-FigFlow = figure('Color','w','Position',[100 100 820 820]);
-ax = axes('Position',[0 0 1 1]);
-axis(ax,'off'); hold(ax,'on');
-xlim(ax,[0 1.15]); ylim(ax,[0 1]);
-
-BOX_W     = 0.52;
-BOX_H     = 0.08;
-EXC_W     = 0.34;
-EXC_H     = 0.075;
-CX        = 0.46;
-EXC_X_L   = CX + BOX_W/2;   % left edge of exclusion arrow start
-EXC_X_R   = 0.76;            % left edge of exclusion box
-FONT_MAIN = 15;
-FONT_EXC  = 12;
-
-COL_MAIN = [0.22 0.45 0.70];
-COL_EXC  = [0.80 0.30 0.10];
-COL_SUB  = [0.15 0.55 0.40];
-
-%% ---- Helper: draw a rounded box with centered text ----
-    function draw_box(cx, cy, w, h, txt, col, fsz)
-        r = rectangle(ax,'Position',[cx-w/2, cy-h/2, w, h], ...
-            'Curvature',0.15, ...
-            'FaceColor',col, ...
-            'EdgeColor',col, ...
-            'LineWidth',1.8);
-        r.FaceAlpha = 0.3;
-        text(ax, cx, cy, txt, ...
-            'HorizontalAlignment','center', ...
-            'VerticalAlignment','middle', ...
-            'FontSize',fsz, ...
-            'FontName','Helvetica', ...
-            'Color',[0.1 0.1 0.1], ...
-            'Interpreter','none');
-    end
-
-%% ---- Helper: vertical arrow between two y positions ----
-    %% ---- Helper: vertical arrow between two y positions ----
-    function draw_arrow_down(cx, y_top, y_bot)
-        plot(ax, [cx cx], [y_top y_bot], '-', ...
-            'Color',[0.3 0.3 0.3], 'LineWidth',1.4);
-        % Arrowhead pointing down
-        hw = 0.012;  % half-width of arrowhead
-        hl = 0.018;  % height of arrowhead
-        fill(ax, [cx-hw, cx+hw, cx], [y_bot+hl, y_bot+hl, y_bot], ...
-            [0.3 0.3 0.3], 'EdgeColor','none');
-    end
-
-%% ---- Helper: horizontal arrow from main column midpoint to exclusion box ----
-    function draw_arrow_right(y_mid)
-        x_start = CX;        % start at center of main column (on the down arrow)
-        x_end   = EXC_X_R;
-        plot(ax, [x_start x_end], [y_mid y_mid], '-', ...
-            'Color',COL_EXC, 'LineWidth',1.2);
-        % Arrowhead pointing right
-        hw = 0.012;
-        hl = 0.018;
-        fill(ax, [x_end-hl, x_end-hl, x_end], [y_mid-hw, y_mid+hw, y_mid], ...
-            COL_EXC, 'EdgeColor','none');
-    end
-
-%% ---- Y positions of main boxes ----
-y1 = 0.90;   % total patients
-y2 = 0.74;   % after outpatient/routine filter
-y3 = 0.57;   % after epilepsy diagnosis filter
-y4 = 0.40;   % final cohort (after sz freq filter)
-y5 = 0.18;   % subtype + model box (combined)
-
-%% ---- Midpoints between main boxes (where horizontal arrows branch off) ----
-ym12 = (y1 + y2) / 2;
-ym23 = (y2 + y3) / 2;
-ym34 = (y3 + y4) / 2;
-
-%% ---- Main boxes ----
-draw_box(CX, y1, BOX_W, BOX_H, ...
-    sprintf('All patients with EEG data\nN = %d', EC.nTotal), ...
-    COL_MAIN, FONT_MAIN);
-
-draw_box(CX, y2, BOX_W, BOX_H, ...
-    sprintf('Outpatient routine EEG <=4 hours\nN = %d', EC.nAfterOutptRoutine), ...
-    COL_MAIN, FONT_MAIN);
-
-draw_box(CX, y3, BOX_W, BOX_H, ...
-    sprintf('LLM-confirmed epilepsy diagnosis\nN = %d', ...
-        EC.nAfterOutptRoutine - EC.nExcludedNoEpilepsy), ...
-    COL_MAIN, FONT_MAIN);
-
-draw_box(CX, y4, BOX_W, BOX_H, ...
-    sprintf('Documented seizure frequency\nN = %d (primary cohort)', EC.nFinalCohort), ...
-    COL_SUB, FONT_MAIN);
-
-% Combined subtype + model box
-draw_box(CX, y5, BOX_W, BOX_H*1.5, ...
-    sprintf('Known epilepsy subtype\n(temporal, frontal, generalized)\nfor mixed effects model\nN = %d patients, %d EEG-visit pairs', ...
-        n_subtype, n_pairs), ...
-    COL_SUB, FONT_MAIN);
-
-%% ---- Down arrows ----
-draw_arrow_down(CX, y1-BOX_H/2, y2+BOX_H/2);
-draw_arrow_down(CX, y2-BOX_H/2, y3+BOX_H/2);
-draw_arrow_down(CX, y3-BOX_H/2, y4+BOX_H/2);
-draw_arrow_down(CX, y4-BOX_H/2, y5+BOX_H*1.5/2);
-
-%% ---- Horizontal exclusion arrows (branch off midpoint of each down arrow) ----
-draw_arrow_right(ym12);
-draw_arrow_right(ym23);
-draw_arrow_right(ym34);
-
-%% ---- Exclusion boxes ----
-EXC_CX = EXC_X_R + EXC_W/2;   % center x of exclusion boxes
-
-draw_box(EXC_CX, ym12, EXC_W, EXC_H, ...
-    sprintf('Excluded: inpatient or\nambulatory EEG\nN = %d', ...
-        EC.nTotal - EC.nAfterOutptRoutine), ...
-    COL_EXC, FONT_EXC);
-
-draw_box(EXC_CX, ym23, EXC_W, EXC_H, ...
-    sprintf('Excluded: no epilepsy\ndiagnosis (NESD, uncertain,\nor unknown)\nN = %d', ...
-        EC.nExcludedNoEpilepsy), ...
-    COL_EXC, FONT_EXC);
-
-draw_box(EXC_CX, ym34, EXC_W, EXC_H, ...
-    sprintf('Excluded: no documented\nseizure frequency\nN = %d', ...
-        EC.nExcludedNoSzFreq), ...
-    COL_EXC, FONT_EXC);
-
-%% ---- Title ----
-text(ax, CX, 0.97, 'Study participant flow', ...
-    'HorizontalAlignment','center', ...
-    'VerticalAlignment','top', ...
-    'FontSize',16, ...
-    'FontWeight','bold', ...
-    'FontName','Helvetica');
-
 end
