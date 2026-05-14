@@ -46,7 +46,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 0;%5000;
+nBoot    = 5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
