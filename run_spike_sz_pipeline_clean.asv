@@ -46,7 +46,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 5000;
+nBoot    = 0;%5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -1509,6 +1509,8 @@ rows = {};
 model_specs = {
     'M1','M1 (logistic, subtypes, interactions)',                       'logistic', MMR.FE_M1,     MMR.BootstrapTable1;
     'M2','M2 (logistic, subtypes, no interactions)',                    'logistic', MMR.FE_M2,     MMR.BootstrapTable2;
+    'M_after', 'M_after (visits after EEG only, sensitivity)',         'logistic', MMR.FE_after,  MMR.BootstrapTable_after;
+    'M_before','M_before (visits before EEG only, sensitivity)',       'logistic', MMR.FE_before, MMR.BootstrapTable_before;
 };
 
 for mi = 1:size(model_specs,1)
@@ -1743,7 +1745,7 @@ fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lo
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
 fprintf(fid,[' Our secondary analysis also found that spike-seizure correlations were stronger '...
-    'for clinic visits close in time to the EEG (Fig. S4). '])
+    'for clinic visits close in time to the EEG than those far re'])
 fprintf(fid,['Together, these results confirm a positive spike rate–seizure association '...
     'and suggest it is strongest when the EEG is obtained close to the clinic visit, '...
     'consistent with spike rates tracking within-individual seizure burden over time.</p>\n']);
