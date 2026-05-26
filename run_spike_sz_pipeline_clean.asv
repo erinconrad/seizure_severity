@@ -46,7 +46,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 5000;
+nBoot    = 0;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -98,6 +98,20 @@ fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
 
 %% ======================= FIT MODELS =======================
 MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
+
+
+% Are they even in the PairTable before model filtering?
+missing_in_pairs = setdiff(missing_pats, unique(PairTable.Patient));
+fprintf('Missing from PairTable entirely: %d\n', numel(missing_in_pairs));
+
+% If they are in PairTable, what's getting filtered?
+for i = 1:numel(missing_pats)
+    p = missing_pats(i);
+    rows = PairTable(PairTable.Patient == p, :);
+    fprintf('Patient %d: %d pairs, finite HasSz=%d, finite SzFreq=%d, finite Lag=%d\n', ...
+        p, height(rows), nnz(isfinite(rows.HasSz)), ...
+        nnz(isfinite(rows.SzFreq)), nnz(isfinite(rows.SignedLag_days)));
+end
 
 
 %% ======================= FLOW DIAGRAM =======================
@@ -314,17 +328,8 @@ Has_agg  = splitapply(@max_hasSz, PV.HasSz, gv);
 Vuniq = table(pid_keys, date_keys, Freq_agg, Has_agg, ...
     'VariableNames', {'Patient','VisitDate','Freq','HasSz'});
 Vuniq.Freq_R1 = Vuniq.Freq;
-% Rule 1: HasSz==0 with no documented frequency → impute SzFreq=0
 mask_rule1 = ~isfinite(Vuniq.Freq_R1) & (Vuniq.HasSz==0);
-Vuniq.Freq_R1(mask_rule1) = 0;
-
-% Rule 2 (new): documented SzFreq with no HasSz → impute HasSz
-mask_rule2_sz1 = isfinite(Vuniq.Freq_R1) & (Vuniq.Freq_R1 > 0) & ~isfinite(Vuniq.HasSz);
-mask_rule2_sz0 = isfinite(Vuniq.Freq_R1) & (Vuniq.Freq_R1 == 0) & ~isfinite(Vuniq.HasSz);
-Vuniq.HasSz(mask_rule2_sz1) = 1;
-Vuniq.HasSz(mask_rule2_sz0) = 0;
-fprintf('[Rule 2] Imputed HasSz for %d visits with SzFreq>0, %d visits with SzFreq=0\n', ...
-    nnz(mask_rule2_sz1), nnz(mask_rule2_sz0));
+Vuniq.Freq_R1(mask_rule1) = 0; % set sz freq to be 0 if has sz = 0
 end
 
 function SzP = build_patient_seizure_metrics(Vuniq)
