@@ -46,7 +46,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 0;
+nBoot    = 5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -98,20 +98,6 @@ fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
 
 %% ======================= FIT MODELS =======================
 MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
-
-
-% Are they even in the PairTable before model filtering?
-missing_in_pairs = setdiff(missing_pats, unique(PairTable.Patient));
-fprintf('Missing from PairTable entirely: %d\n', numel(missing_in_pairs));
-
-% If they are in PairTable, what's getting filtered?
-for i = 1:numel(missing_pats)
-    p = missing_pats(i);
-    rows = PairTable(PairTable.Patient == p, :);
-    fprintf('Patient %d: %d pairs, finite HasSz=%d, finite SzFreq=%d, finite Lag=%d\n', ...
-        p, height(rows), nnz(isfinite(rows.HasSz)), ...
-        nnz(isfinite(rows.SzFreq)), nnz(isfinite(rows.SignedLag_days)));
-end
 
 
 %% ======================= FLOW DIAGRAM =======================
@@ -328,8 +314,17 @@ Has_agg  = splitapply(@max_hasSz, PV.HasSz, gv);
 Vuniq = table(pid_keys, date_keys, Freq_agg, Has_agg, ...
     'VariableNames', {'Patient','VisitDate','Freq','HasSz'});
 Vuniq.Freq_R1 = Vuniq.Freq;
+% Rule 1: HasSz==0 with no documented frequency → impute SzFreq=0
 mask_rule1 = ~isfinite(Vuniq.Freq_R1) & (Vuniq.HasSz==0);
-Vuniq.Freq_R1(mask_rule1) = 0; % set sz freq to be 0 if has sz = 0
+Vuniq.Freq_R1(mask_rule1) = 0;
+
+% Rule 2 (new): documented SzFreq with no HasSz → impute HasSz
+mask_rule2_sz1 = isfinite(Vuniq.Freq_R1) & (Vuniq.Freq_R1 > 0) & ~isfinite(Vuniq.HasSz);
+mask_rule2_sz0 = isfinite(Vuniq.Freq_R1) & (Vuniq.Freq_R1 == 0) & ~isfinite(Vuniq.HasSz);
+Vuniq.HasSz(mask_rule2_sz1) = 1;
+Vuniq.HasSz(mask_rule2_sz0) = 0;
+fprintf('[Rule 2] Imputed HasSz for %d visits with SzFreq>0, %d visits with SzFreq=0\n', ...
+    nnz(mask_rule2_sz1), nnz(mask_rule2_sz0));
 end
 
 function SzP = build_patient_seizure_metrics(Vuniq)
@@ -1654,7 +1649,7 @@ fprintf(fid,['<p>Of %d patients with EEG data in the Penn Epilepsy Center databa
 
 %% Figure 1
 fprintf(fid,'<h2>Spike rates by patient groups</h2>\n');
-fprintf(fid,'<p>Spike rates were higher in EEGs with clinically-reported spikes (median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 2A). ', ...
+fprintf(fid,'<p>Detected spike rates were higher in EEGs with clinically-reported spikes (median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 2A). ', ...
     Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
     Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
     format_p_html(Fig1Stats.p_rankSum_A), Fig1Stats.effectA_cliff);

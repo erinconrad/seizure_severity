@@ -642,27 +642,23 @@ keepMask = ismember(string(PairTable.EpiType3), canonical3) & ...
 T = PairTable(keepMask, :);
 
 T.HasSz_bin    = double(T.HasSz == 1);
-EPS_SZ         = 1e-3;
-T.LogSzFreq    = log(T.SzFreq + EPS_SZ);
 T.AbsLag_years = abs(T.SignedLag_years);
-T.LagDirection = sign(T.SignedLag_years);
-T.LagDirection(T.SignedLag_years == 0) = 1;
+% Binary: 1 if visit occurred after EEG (or same day), 0 if before
+T.VisitAfterEEG = double(T.SignedLag_years >= 0);
 T.EpiType3_cat = reordercats(categorical(string(T.EpiType3), canonical3), ...
     ["Temporal","Frontal","General"]);
 
 fprintf('[Model table] %d pairs, %d patients\n', height(T), numel(unique(T.Patient)));
 
 %% ---- MODEL FORMULAS ----
-% Primary model, includes interactions between spike rate and abs lag and
-% spike rate and lag direction
 formula_M1 = ['HasSz_bin ~ ' ...
     'LogSpikesPerHour * AbsLag_years + ' ...
-    'LogSpikesPerHour * LagDirection + ' ...
+    'LogSpikesPerHour * VisitAfterEEG + ' ...
     'EpiType3_cat + (1|PatientID)'];
 
 % Alternate model, no interaction terms
 formula_M2 = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour + AbsLag_years + LagDirection + ' ...
+    'LogSpikesPerHour + AbsLag_years + VisitAfterEEG + ' ...
     'EpiType3_cat + (1|PatientID)'];
 
 %% ---- FIT MODELS ----
@@ -1046,11 +1042,11 @@ disp_names = raw_names;
 disp_names(disp_names=="(Intercept)")                   = "Intercept";
 disp_names(disp_names=="LogSpikesPerHour")              = "Log spike rate";
 disp_names(disp_names=="AbsLag_years")                  = "EEG-visit gap (years)";
-disp_names(disp_names=="LagDirection")                  = "Visit after vs before EEG";
+disp_names(disp_names=="VisitAfterEEG")                 = "Visit after vs before EEG";
 disp_names(disp_names=="EpiType3_cat_Frontal")          = "Frontal vs Temporal";
 disp_names(disp_names=="EpiType3_cat_General")          = "Generalized vs Temporal";
 disp_names(disp_names=="LogSpikesPerHour:AbsLag_years") = "Spike rate effect per year of gap";
-disp_names(disp_names=="LogSpikesPerHour:LagDirection") = "Spike rate effect: visit before or after";
+disp_names(disp_names=="LogSpikesPerHour:VisitAfterEEG") = "Spike rate effect: visit before or after";
 
 isInt       = (disp_names=="Intercept");
 OR_C        = OR_C(~isInt);
@@ -1090,7 +1086,8 @@ th = title(axC,{'A. Spike rate, epilepsy type, and EEG-visit gap', 'predict seiz
     'FontSize',FONT_SIZE,'FontWeight','bold');
 th.Units = 'normalized'; th.Position(2) = th.Position(2) + 0.02; th.Position(1) = th.Position(1) - 0.13;
 all_ors = [OR_lo_C; OR_hi_C];
-xlim(axC,[max(0.4,prctile(all_ors,2)), min(2.0,prctile(all_ors,98))]);
+xpad = 0.05 * (max(OR_hi_C) - min(OR_lo_C));
+xlim(axC, [min(OR_lo_C) - xpad, max(OR_hi_C) + xpad]);
 
 %% Panel D: Predicted probability vs spike rate by lag distance
 axes(axD); hold(axD,'on'); box(axD,'off'); grid(axD,'on');
@@ -1109,9 +1106,9 @@ bnames      = string(betanames_pred.Name);
 b_intercept = beta_pred(bnames=="(Intercept)");
 b_spike     = beta_pred(bnames=="LogSpikesPerHour");
 b_abslag    = beta_pred(bnames=="AbsLag_years");
-b_dir       = beta_pred(bnames=="LagDirection");
+b_dir       = beta_pred(bnames=="VisitAfterEEG");
 b_int_prox  = beta_pred(bnames=="LogSpikesPerHour:AbsLag_years");
-b_int_dir   = beta_pred(bnames=="LogSpikesPerHour:LagDirection");
+b_int_dir   = beta_pred(bnames=="LogSpikesPerHour:VisitAfterEEG");
 dir_val     = 1;   % visit after EEG; temporal epilepsy reference
 
 for k = 1:numel(lag_vals)
@@ -1504,11 +1501,11 @@ function write_tableS1(MMR, outPath)
 function disp = clean_term(raw)
     disp = raw;
     disp = strrep(disp,'(Intercept)',                   'Intercept');
-    disp = strrep(disp,'LogSpikesPerHour:AbsLag_years', 'Log spike rate x Absolute lag');
-    disp = strrep(disp,'LogSpikesPerHour:LagDirection', 'Log spike rate x Lag direction');
-    disp = strrep(disp,'LogSpikesPerHour',              'Log spike rate');
-    disp = strrep(disp,'AbsLag_years',                  'Absolute lag (years)');
-    disp = strrep(disp,'LagDirection',                  'Lag direction (after vs before)');
+    disp = strrep(disp,'LogSpikesPerHour:AbsLag_years',  'Log spike rate x Absolute lag');
+    disp = strrep(disp,'LogSpikesPerHour:VisitAfterEEG', 'Log spike rate x Visit after EEG');
+    disp = strrep(disp,'LogSpikesPerHour',               'Log spike rate');
+    disp = strrep(disp,'AbsLag_years',                   'Absolute lag (years)');
+    disp = strrep(disp,'VisitAfterEEG',                  'Visit after vs before EEG');
     disp = strrep(disp,'SignedLag_years',               'Signed lag (years)');
     disp = strrep(disp,'EpiType3_cat_Frontal',          'Frontal vs Temporal epilepsy');
     disp = strrep(disp,'EpiType3_cat_General',          'Generalized vs Temporal epilepsy');
@@ -1649,7 +1646,7 @@ fprintf(fid,['<p>Of %d patients with EEG data in the Penn Epilepsy Center databa
 
 %% Figure 1
 fprintf(fid,'<h2>Spike rates by patient groups</h2>\n');
-fprintf(fid,'<p>Spike rates were higher in EEGs with clinically-reported spikes (median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 2A). ', ...
+fprintf(fid,'<p>Detected spike rates were higher in EEGs with clinically-reported spikes (median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 2A). ', ...
     Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
     Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
     format_p_html(Fig1Stats.p_rankSum_A), Fig1Stats.effectA_cliff);
@@ -1698,9 +1695,9 @@ fprintf(fid,'<p><em>CIs from %s.</em></p>\n', ci_source);
 
 getRow = @(tbl,nm) tbl(string(tbl.Term)==nm,:);
 r_spike    = getRow(BT,'LogSpikesPerHour');
-r_dir      = getRow(BT,'LagDirection');
+r_dir      = getRow(BT,'VisitAfterEEG');
 r_int_prox = getRow(BT,'LogSpikesPerHour:AbsLag_years');
-r_int_dir  = getRow(BT,'LogSpikesPerHour:LagDirection');
+r_int_dir  = getRow(BT,'LogSpikesPerHour:VisitAfterEEG');
 r_frontal  = getRow(BT,'EpiType3_cat_Frontal');
 r_general  = getRow(BT,'EpiType3_cat_General');
 FE1  = MMR.FE_M1;
@@ -1746,9 +1743,10 @@ fprintf(fid,['%.2f at a 6-month lag, %.2f at 2 years, and %.2f at 4 years ' ...
 
 fprintf(fid,['Spike rates from EEGs obtained before versus after a clinic '...
     'visit were similarly associated with seizure occurrence  (interaction OR=%.3f [%.3f-%.3f], %s). '], ...
-    r_int_dir.OR, r_int_dir.OR_CI_lo, r_int_dir.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:LagDirection')));
+    r_int_dir.OR, r_int_dir.OR_CI_lo, r_int_dir.OR_CI_hi, format_p_html(getP('LogSpikesPerHour:VisitAfterEEG')));
+
 fprintf(fid,'Visits occurring after the EEG had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), consistent with gradual clinical improvement over time (Fig. S4). ', ...
-    r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('LagDirection')));
+    r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('VisitAfterEEG')));
 fprintf(fid,'Compared with temporal lobe epilepsy, generalized epilepsy had a lower baseline odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did not differ significantly (OR=%.2f [%.2f-%.2f], %s). ', ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
