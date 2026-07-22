@@ -39,8 +39,6 @@ NESD_LABEL        = "Non-Epileptic Seizure Disorder";
 badTypes          = lower(["Uncertain if Epilepsy","Unknown or MRN not found",""]);
 canonical3        = ["General","Temporal","Frontal"];
 
-DURATION_SOURCE = "natus"; % use duration from Natus or from raw edf ("natus" vs "file"))
-
 EPS_RATE       = 30e-3; % How much epsilon to add to zero spike rates so it doesn't screw up log scale on figures
 Y_ZERO         = log10(EPS_RATE);
 Y_LIMS         = [-2 4];
@@ -49,7 +47,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 5000;
+nBoot    = 0;%5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -65,6 +63,7 @@ allowable_visits = [
 %% ======================= LOAD DATA =======================
 SpikeSummaryTable = readtable(spikeSummaryMultiCsv,'TextType','string','VariableNamingRule','preserve');
 require_cols(SpikeSummaryTable, ["Patient","Session",countCol,durCol], "SpikeSummaryTable");
+SpikeSummaryTable.SpikeRate_perHour = SpikeSummaryTable.(countCol) ./ SpikeSummaryTable.(durCol) * 3600;
 
 ReportTable = readtable(reportCsv,'TextType','string','VariableNamingRule','preserve');
 require_cols(ReportTable, ...
@@ -72,15 +71,8 @@ require_cols(ReportTable, ...
      "report_PATIENT_CLASS","jay_in_or_out", ...
      "visit_type","visit_dates_deid","sz_freqs","visit_hasSz", ...
      "epilepsy_type","epilepsy_specific","nlp_gender","deid_birth_date","start_time_deid", ...
-     "report_SPORADIC_EPILEPTIFORM_DISCHARGES","jay_focal_epi","jay_multifocal_epi","jay_gen_epi", ...
-     "duration_hms"], ...
+     "report_SPORADIC_EPILEPTIFORM_DISCHARGES","jay_focal_epi","jay_multifocal_epi","jay_gen_epi"], ...
     "ReportTable");
-
-% Apply the duration-source toggle BEFORE computing spike rate, so the chosen
-% duration propagates to spike rates, the <4h filter, and everything downstream.
-SpikeSummaryTable = apply_duration_source(SpikeSummaryTable, ReportTable, DURATION_SOURCE, durCol);
-
-SpikeSummaryTable.SpikeRate_perHour = SpikeSummaryTable.(countCol) ./ SpikeSummaryTable.(durCol) * 3600;
 
 %% ======================= FILTER =======================
 ReportTable = filter_visit_arrays_by_type(ReportTable, allowable_visits); % only allow outpatient clinic visits
@@ -107,9 +99,6 @@ fprintf('Canonical-subtype pairs: %d, patients: %d\n', ...
 
 %% ======================= FIT MODELS =======================
 MMR = fit_mixed_effects_models(PairTable, nBoot, alpha);
-
-%% ======================= CHECK DURATION ===================
-DurCompare = add_duration_to_model(MMR, Views);
 
 %% ======================= HISTOGRAM OF DURATIONS =======================
 figDur_out = '../output/FigDuration.png';
@@ -2788,217 +2777,45 @@ NearFarStats.gapsUsed = gaps;
 end
 
 function figH = make_eeg_duration_histogram(Views, outPath)
-% Histogram comparing two EEG duration measures for the study cohort EEGs
-% (Views.SessionsForFigures):
-%   (1) File duration  — Duration_sec from the spike summary table
-%   (2) Natus duration — duration_hms from the report, which clips out
-%                        segments recorded prior to electrode connection
+% Histogram of EEG durations (in minutes) for the EEGs used in the study,
+% i.e. the cohort-restricted sessions in Views.SessionsForFigures.
 if nargin < 2, outPath = ''; end
 
 FONT_SIZE = 20;
-COL_FILE  = [0.22 0.45 0.70];   % file duration
-COL_NATUS = [0.85 0.33 0.10];   % Natus server duration
 
-%% --- File duration (minutes) ---
 Sess = Views.SessionsForFigures;
 require_cols(Sess, ["Patient","Session","Duration_sec"], "SessionsForFigures");
+
+% Each row should be one EEG
 assert_unique_keys(Sess, "Patient", "Session", "SessionsForFigures");
-FileDur = Sess(:, {'Patient','Session','Duration_sec'});
-FileDur.FileMin = double(FileDur.Duration_sec) / 60;
 
-%% --- Natus duration (minutes) ---
-Rep = Views.ReportForKeptSessions;
-require_cols(Rep, ["Patient","Session","duration_hms"], "ReportForKeptSessions");
-assert_unique_keys(Rep, "Patient", "Session", "ReportForKeptSessions");
-NatusDur = Rep(:, {'Patient','Session','duration_hms'});
-NatusDur.NatusMin = minutes(NatusDur.duration_hms);   % duration array -> minutes
+dur_min = double(Sess.Duration_sec) / 60;
+dur_min = dur_min(isfinite(dur_min));
+assert(~isempty(dur_min), 'No finite EEG durations found in SessionsForFigures.');
 
-%% --- Join so both measures refer to the same EEGs ---
-D = innerjoin(FileDur(:,{'Patient','Session','FileMin'}), ...
-              NatusDur(:,{'Patient','Session','NatusMin'}), ...
-              'Keys', {'Patient','Session'});
-assert(height(D) == height(FileDur), ...
-    'Join dropped EEGs: %d file rows vs %d matched (missing report row?).', ...
-    height(FileDur), height(D));
+% Summary stats
+med = median(dur_min);
+q   = prctile(dur_min, [25 75]);
+fprintf('EEG durations (min): N=%d, median=%.1f (IQR %.1f-%.1f), range %.1f-%.1f\n', ...
+    numel(dur_min), med, q(1), q(2), min(dur_min), max(dur_min));
 
-file_min  = D.FileMin(isfinite(D.FileMin));
-natus_min = D.NatusMin(isfinite(D.NatusMin));
-assert(~isempty(file_min) && ~isempty(natus_min), 'No finite durations found.');
-
-%% --- Common bins across both measures ---
-binW  = 5;
-allD  = [file_min; natus_min];
-edges = 0 : binW : (ceil(max(allD)/binW)*binW);
-
-figH = figure('Color','w','Position',[100 100 850 540]);
+% Plot
+figH = figure('Color','w','Position',[100 100 800 520]);
 ax = axes(figH); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
-
-histogram(ax, file_min,  'BinEdges', edges, ...
-    'FaceColor', COL_FILE,  'FaceAlpha', 0.5, 'EdgeColor','none', ...
-    'DisplayName', sprintf('File duration (N=%d)', numel(file_min)));
-histogram(ax, natus_min, 'BinEdges', edges, ...
-    'FaceColor', COL_NATUS, 'FaceAlpha', 0.5, 'EdgeColor','none', ...
-    'DisplayName', sprintf('Natus duration (N=%d)', numel(natus_min)));
-
-med_file  = median(file_min);
-med_natus = median(natus_min);
-xline(ax, med_file,  '--', 'Color', COL_FILE,  'LineWidth', 2, 'HandleVisibility','off');
-xline(ax, med_natus, '--', 'Color', COL_NATUS, 'LineWidth', 2, 'HandleVisibility','off');
-
+histogram(ax, dur_min, 'BinWidth', 5, ...
+    'FaceColor',[0.22 0.45 0.70], 'FaceAlpha',0.7, 'EdgeColor','none');
+xline(ax, med, 'k--', 'LineWidth', 2);
+text(ax, med, ax.YLim(2), sprintf(' median = %.1f min', med), ...
+    'HorizontalAlignment','left', 'VerticalAlignment','top', 'FontSize', FONT_SIZE-4);
 xlabel(ax, 'EEG duration (minutes)', 'FontSize', FONT_SIZE);
 ylabel(ax, 'Number of EEGs', 'FontSize', FONT_SIZE);
-title(ax, sprintf('EEG durations in study cohort (N = %d EEGs)', height(D)), ...
+title(ax, sprintf('EEG durations in study cohort (N = %d EEGs)', numel(dur_min)), ...
     'FontSize', FONT_SIZE, 'FontWeight','bold');
-legend(ax, 'Location','northeast', 'FontSize', FONT_SIZE-6);
 set(ax, 'FontSize', FONT_SIZE);
 
-%% --- Summary stats (durations + paired clipping) ---
-qf = prctile(file_min,  [25 75]);
-qn = prctile(natus_min, [25 75]);
-paired = isfinite(D.FileMin) & isfinite(D.NatusMin);
-clip   = D.FileMin(paired) - D.NatusMin(paired);   % how much Natus clips
-fprintf(['File duration (min):  median=%.1f (IQR %.1f-%.1f)\n' ...
-         'Natus duration (min): median=%.1f (IQR %.1f-%.1f)\n' ...
-         'Clipped file-Natus (min): median=%.1f (IQR %.1f-%.1f), N=%d\n'], ...
-    med_file,  qf(1), qf(2), ...
-    med_natus, qn(1), qn(2), ...
-    median(clip), prctile(clip,25), prctile(clip,75), nnz(paired));
-
-%% --- Save ---
+% Save
 if strlength(string(outPath)) > 0
     save_fig(figH, outPath);
     fprintf('Saved EEG duration histogram: %s\n', outPath);
-end
-end
-
-function DurCompare = add_duration_to_model(MMR, Views, alpha)
-% Refit the primary model M1 with and without EEG duration (hours) as a
-% covariate, and run a likelihood ratio test for whether it improves fit.
-if nargin < 3, alpha = 0.05; end
-
-%% --- Attach EEG duration (hours) to the model table ---
-T = MMR.ModelTable;
-require_cols(T, ["Patient","Session","HasSz_bin","LogSpikesPerHour", ...
-    "AbsLag_years","VisitAfterEEG","EpiType3_cat","PatientID"], "MMR.ModelTable");
-
-Dur = Views.SessionLevelSpikeRates(:, {'Patient','Session','Duration_sec'});
-Dur.Duration_sec = double(Dur.Duration_sec);
-
-nBefore = height(T);
-T = innerjoin(T, Dur, 'Keys', {'Patient','Session'});
-assert(height(T) == nBefore, ...
-    'Duration join changed row count (%d -> %d); duplicate or missing session keys.', ...
-    nBefore, height(T));
-
-T.EEG_DurationHours = T.Duration_sec / 3600;
-
-% Both models must be fit on identical rows for a valid LRT
-keep = isfinite(T.EEG_DurationHours);
-assert(all(keep), 'Non-finite EEG durations present in model table.');
-T = T(keep, :);
-
-%% --- Formulas: reduced = M1, full = M1 + EEG duration ---
-formula_reduced = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour * AbsLag_years + ' ...
-    'LogSpikesPerHour * VisitAfterEEG + ' ...
-    'EpiType3_cat + (1|PatientID)'];
-
-formula_full = ['HasSz_bin ~ ' ...
-    'LogSpikesPerHour * AbsLag_years + ' ...
-    'LogSpikesPerHour * VisitAfterEEG + ' ...
-    'EpiType3_cat + EEG_DurationHours + (1|PatientID)'];
-
-glme_opts = {'Distribution','Binomial','Link','logit', ...
-    'FitMethod','Laplace','CovariancePattern','Diagonal'};
-
-%% --- Fit both models on identical rows ---
-fprintf('\nFitting reduced model (M1, no duration)...\n');
-mdl_reduced = fitglme(T, formula_reduced, glme_opts{:});
-disp(mdl_reduced);
-
-fprintf('\nFitting full model (M1 + EEG duration)...\n');
-mdl_full = fitglme(T, formula_full, glme_opts{:});
-disp(mdl_full);
-
-%% --- Fixed effects table for the full model ---
-[b, bn, s] = fixedEffects(mdl_full, 'Alpha', alpha);
-FE_full = make_fe_table_logistic(bn, b, s);
-fprintf('\nFull model fixed effects (with EEG duration):\n'); disp(FE_full);
-
-%% --- Likelihood ratio test ---
-fprintf('\n=== LRT: does EEG duration improve fit? ===\n');
-lrt = compare(mdl_reduced, mdl_full);   % nested: full = reduced + EEG_DurationHours
-disp(lrt);
-lrt_p = lrt.pValue(2);
-
-dur_row = FE_full(string(FE_full.Term)=="EEG_DurationHours", :);
-fprintf(['\nEEG duration: OR=%.3f [%.3f-%.3f] per hour, p=%.4g\n' ...
-    'LRT (1 df) reduced vs full: p=%.4g\n'], ...
-    dur_row.OR, dur_row.OR_lo, dur_row.OR_hi, dur_row.p, lrt_p);
-
-if lrt_p < alpha
-    fprintf('EEG duration significantly improves model fit (p < %.2g).\n', alpha);
-else
-    fprintf('EEG duration does not significantly improve model fit (p >= %.2g).\n', alpha);
-end
-
-%% --- Bundle ---
-DurCompare.ModelTable  = T;
-DurCompare.mdl_reduced = mdl_reduced;
-DurCompare.mdl_full    = mdl_full;
-DurCompare.FE_full     = FE_full;
-DurCompare.LRT         = lrt;
-DurCompare.LRT_p       = lrt_p;
-DurCompare.Duration_OR    = dur_row.OR;
-DurCompare.Duration_OR_lo = dur_row.OR_lo;
-DurCompare.Duration_OR_hi = dur_row.OR_hi;
-DurCompare.Duration_p     = dur_row.p;
-end
-
-function S = apply_duration_source(S, R, durSource, durCol)
-% Overwrite S.(durCol) (seconds) with the chosen EEG duration source, so that
-% spike rates, the routine <4h filter, and all downstream duration use adopt it.
-%   "file"  : keep Duration_sec from the spike-counts file (full recording)
-%   "natus" : use duration_hms from the report (clips pre-connection segments)
-durSource = lower(string(durSource));
-
-switch durSource
-    case "file"
-        fprintf('[Duration source] Using file duration (%s from spike counts).\n', durCol);
-        return
-
-    case "natus"
-        require_cols(R, ["patient_id","session_number","duration_hms"], "ReportTable");
-
-        % Parse duration_hms to seconds (accept either a duration array or HH:MM:SS text)
-        dur_raw = R.duration_hms;
-        if isduration(dur_raw)
-            natus_sec = seconds(dur_raw);
-        else
-            natus_sec = seconds(duration(strtrim(string(dur_raw)), 'InputFormat','hh:mm:ss'));
-        end
-
-        % Unique (Patient, Session) -> Natus seconds map, with conflict check
-        Map = table(double(R.patient_id), double(R.session_number), natus_sec, ...
-            'VariableNames', {'Patient','Session','NatusDur_sec'});
-        Map = unique(Map, 'rows');
-        assert_unique_keys(Map, "Patient", "Session", "ReportTable duration map");
-
-        % Look up per spike row (ismember preserves S's row order)
-        Skey = [double(S.Patient), double(S.Session)];
-        Mkey = [Map.Patient, Map.Session];
-        [tf, loc] = ismember(Skey, Mkey, 'rows');
-
-        newDur = nan(height(S),1);
-        newDur(tf) = Map.NatusDur_sec(loc(tf));
-        S.(durCol) = newDur;
-
-        nMissing = nnz(~tf);
-        fprintf(['[Duration source] Using Natus duration (duration_hms from report). ' ...
-            '%d/%d spike rows lack a matching Natus duration and are set missing ' ...
-            '(they will drop out at the routine filter).\n'], nMissing, height(S));
-
-    otherwise
-        error('DURATION_SOURCE must be "file" or "natus" (got "%s").', durSource);
 end
 end
