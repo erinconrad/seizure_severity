@@ -49,7 +49,7 @@ TITLE_Y_OFFSET = 0.02;
 spearman_xLims = [-3.5, 4];
 spearman_yLims = [-1.5, 3];
 
-nBoot    = 5000;
+nBoot    = 0;%5000;
 alpha    = 0.05;
 countCol = "count_0_46";
 durCol   = "Duration_sec";
@@ -114,6 +114,23 @@ DurCompare = add_duration_to_model(MMR, Views);
 %% ======================= HISTOGRAM OF DURATIONS =======================
 figDur_out = '../output/FigDuration.png';
 FigDur = make_eeg_duration_histogram(Views, figDur_out);
+
+%% ========================= MRI FIGURE ======================
+%{
+figMRI_out = '../output/FigMRI.png';
+[FigMRI, MRIStats] = make_fig_mri_groups(Views, EPS_RATE, [], [], alpha, figMRI_out);
+%}
+
+%% ========================= CHECK FOR REPORTING BIAS ========
+figBias_out = '../output/FigReportBias.png';
+[FigBias, BiasStats] = make_fig_report_bias(Views, SzFreqPerPatient, EPS_RATE, [], [], alpha, figBias_out);
+
+%% ====================== REMOVE HIGH SPIKERS ===================
+figS1trim_out = '../output/FigS1_trim10.png';
+[SpearmanResults_S1trim, rs_all_S1trim, p_all_S1trim, n_all_S1trim, ...
+ rho_lo_S1trim, rho_hi_S1trim, subtype_ci_S1trim, trimInfo] = ...
+    spearman_trim_top_spikers(Views, canonical3, spearman_xLims, spearman_yLims, ...
+        figS1trim_out, 0.05, false);
 
 %% ======================= FLOW DIAGRAM =======================
 figFlow_out = '../output/FigFlow.png';
@@ -3001,4 +3018,372 @@ switch durSource
     otherwise
         error('DURATION_SOURCE must be "file" or "natus" (got "%s").', durSource);
 end
+end
+
+function MRI = build_patient_mri_groups(ReportForKeptSessions)
+% Collapse cnt_mri / cnt_mri_lesion to one MRI group per patient.
+% Groups: "Normal", "MTS" (mesial temporal sclerosis),
+%         "MCD"  (malformation of cortical/brain development).
+% Patients with empty cnt_mri, or a lesion label outside those two, are dropped.
+% Assumes values are consistent within patient (takes first non-empty).
+require_cols(ReportForKeptSessions, ["Patient","cnt_mri","cnt_mri_lesion"], ...
+    "ReportForKeptSessions");
+
+pid = double(ReportForKeptSessions.Patient);
+mri = lower(strtrim(string(ReportForKeptSessions.cnt_mri)));
+les = lower(strtrim(string(ReportForKeptSessions.cnt_mri_lesion)));
+
+blank = @(x) ismissing(x) | x=="" | x=="null" | x=="[null]" | x=="<missing>";
+mri(blank(mri)) = "";
+les(blank(les)) = "";
+
+[uid, ~, g] = unique(pid, 'stable');
+mri_one = strings(numel(uid),1);
+les_one = strings(numel(uid),1);
+for k = 1:numel(uid)
+    mv = mri(g==k); mv = mv(strlength(mv)>0);
+    lv = les(g==k); lv = lv(strlength(lv)>0);
+    if ~isempty(mv), mri_one(k) = mv(1); end
+    if ~isempty(lv), les_one(k) = lv(1); end
+end
+
+grp      = strings(numel(uid),1);
+isLesion = contains(mri_one,"potential epileptogenic lesion");
+grp(contains(mri_one,"normal"))                        = "Normal";
+grp(isLesion & contains(les_one,"mesial temporal"))    = "MTS";
+grp(isLesion & contains(les_one,"malformation"))       = "MCD";
+
+keep = strlength(grp)>0;
+MRI = table(uid(keep), categorical(grp(keep), ["Normal","MTS","MCD"]), ...
+    'VariableNames', {'Patient','MRIGroup'});
+fprintf('[MRI groups] Assigned %d/%d cohort patients to an MRI group.\n', ...
+    nnz(keep), numel(uid));
+end
+
+function [FigMRI, MRIStats] = make_fig_mri_groups(Views, EPS_RATE, EPS_FREQ, nBoot, alpha, outPath)
+% Five-panel MRI figure at the patient level, primary cohort:
+%   A: spike rate across Normal/MTS/MCD  (Kruskal-Wallis + Bonferroni pairwise)
+%   B: seizure frequency across the same three groups
+%   C-E: spike rate vs seizure frequency correlation, one per group
+%        (Spearman rho, bootstrap CI, Bonferroni p across the 3 groups)
+if nargin < 2 || isempty(EPS_RATE), EPS_RATE = 30e-3; end
+if nargin < 3 || isempty(EPS_FREQ), EPS_FREQ = 1e-3;  end
+if nargin < 4 || isempty(nBoot),    nBoot    = 5000;  end
+if nargin < 5 || isempty(alpha),    alpha    = 0.05;  end
+if nargin < 6, outPath = ''; end
+
+FONT       = 18;
+grp_names  = ["Normal","MTS","MCD"];
+grp_colors = [0.30 0.45 0.70; 0.85 0.33 0.10; 0.20 0.55 0.45];
+
+%% --- Patient-level data: reuse primary cohort spike rate + sz freq ---
+P   = Views.PatientSpikeSz_All(:, {'Patient','MeanSpikeRate_perHour','MeanSzFreq'});
+MRI = build_patient_mri_groups(Views.ReportForKeptSessions);
+D   = innerjoin(P, MRI, 'Keys', 'Patient');
+D   = D(isfinite(D.MeanSpikeRate_perHour) & isfinite(D.MeanSzFreq), :);
+
+nPer = arrayfun(@(nm) nnz(D.MRIGroup==nm), grp_names);
+fprintf('[MRI figure] Normal N=%d, MTS N=%d, MCD N=%d (total %d)\n', ...
+    nPer(1), nPer(2), nPer(3), height(D));
+
+% Shared correlation-panel axis limits (comparable across groups)
+xl_corr = [min(to_log10_per_month(D.MeanSzFreq,EPS_FREQ))-0.3, ...
+           max(to_log10_per_month(D.MeanSzFreq,EPS_FREQ))+0.3];
+yl_corr = [min(to_log10_per_hour(D.MeanSpikeRate_perHour,EPS_RATE))-0.3, ...
+           max(to_log10_per_hour(D.MeanSpikeRate_perHour,EPS_RATE))+0.3];
+
+FigMRI = figure('Color','w','Position',[60 60 1500 900]);
+tiledlayout(FigMRI, 2, 3, 'TileSpacing','compact','Padding','compact');
+
+%% --- Panel A: spike rate across groups ---
+axA = nexttile(1);
+sA = group_panel(axA, D.MeanSpikeRate_perHour, D.MRIGroup, EPS_RATE, ...
+    'Spikes/hour (log scale)', 'A. Spike rate by MRI group');
+
+%% --- Panel B: seizure frequency across groups ---
+axB = nexttile(2);
+sB = group_panel(axB, D.MeanSzFreq, D.MRIGroup, EPS_FREQ, ...
+    'Seizures/month (log scale)', 'B. Seizure frequency by MRI group');
+
+%% --- Tile 3: group-N summary ---
+axS = nexttile(3); axis(axS,'off');
+text(axS, 0.02, 0.95, sprintf(['MRI groups (patient level)\n\n' ...
+    'Normal: N=%d\nMTS: N=%d\nMCD: N=%d\n\nTotal: N=%d'], ...
+    nPer(1), nPer(2), nPer(3), height(D)), ...
+    'Units','normalized','VerticalAlignment','top','FontSize',FONT);
+
+%% --- Panels C-E: correlation per group (Bonferroni over 3 groups) ---
+titles = ["C. Normal","D. MTS","E. MCD"];
+corrStats = struct('Group',{},'rho',{},'p_raw',{},'p_bonf',{},'ci',{},'N',{});
+for k = 1:3
+    ax  = nexttile(3+k);
+    sub = D(D.MRIGroup==grp_names(k), :);
+    cs  = corr_panel(ax, sub.MeanSpikeRate_perHour, sub.MeanSzFreq, ...
+        grp_colors(k,:), titles(k), 3);
+    cs.Group = grp_names(k);
+    corrStats(k) = cs;
+end
+
+%% --- Save + bundle ---
+if strlength(string(outPath)) > 0
+    save_fig(FigMRI, outPath);
+    fprintf('Saved MRI figure: %s\n', outPath);
+end
+MRIStats.GroupN     = table(grp_names(:), nPer(:), 'VariableNames',{'Group','N'});
+MRIStats.SpikeRate  = sA;
+MRIStats.SzFreq     = sB;
+MRIStats.Corr       = corrStats;
+
+%% ================= nested panel helpers =================
+    function stats = group_panel(ax, valAll, grpAll, epsFloor, ylab, ttl)
+        hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+        Y  = to_log10_per_hour(valAll, epsFloor);   % generic log10 w/ eps floor
+        yz = log10(epsFloor);
+        yl = [min([yz; Y])-0.3, max(Y)+0.6];
+        Yj = add_y_jitter_eps(Y, yz, yl, 0.02);
+
+        boxchart(ax, grpAll, Yj, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
+        swarmchart(ax, grpAll, Yj, 18, 'filled','MarkerFaceAlpha',0.30);
+        yline(ax, yz, ':', 'Color',[0.4 0.4 0.4], 'LineWidth',1.2);
+        for k = 1:numel(grp_names)
+            [m,lo,hi] = bootstrap_median_ci(valAll(grpAll==grp_names(k)), nBoot, alpha);
+            add_median_ci_overlay(ax, k, m, lo, hi, epsFloor);
+        end
+        ylim(ax, yl);
+        set_log10_ticks(ax, 'y', epsFloor, yl);
+        ylabel(ax, ylab, 'FontSize', FONT);
+        title(ax, ttl, 'FontSize', FONT, 'FontWeight','bold');
+
+        p_kw = kruskalwallis(valAll, grpAll, 'off');
+        pairs = [1 2; 1 3; 2 3];
+        p_pair = nan(3,1);
+        for i = 1:3
+            xa = valAll(grpAll==grp_names(pairs(i,1)));
+            xb = valAll(grpAll==grp_names(pairs(i,2)));
+            if nnz(isfinite(xa))>=3 && nnz(isfinite(xb))>=3
+                p_pair(i) = ranksum(xa, xb, 'method','approx');
+            end
+        end
+        p_pair_bonf = min(p_pair*3, 1);
+        yStep = 0.11*range(yl); y0 = yl(2) - 0.05*range(yl);
+        for i = 1:3
+            if isnan(p_pair_bonf(i)), continue; end
+            add_sigbar(ax, pairs(i,1), pairs(i,2), y0-(i-1)*yStep, p_label(p_pair_bonf(i)));
+        end
+
+        lbl = string(ax.XTickLabel);
+        for k = 1:numel(grp_names)
+            lbl(lbl==grp_names(k)) = sprintf('%s (N=%d)', grp_names(k), nnz(grpAll==grp_names(k)));
+        end
+        ax.XTickLabel = lbl; ax.XTickLabelRotation = 20;
+        set(ax,'FontSize',FONT);
+        stats = struct('p_kw',p_kw,'pairs',pairs,'p_pair',p_pair,'p_pair_bonf',p_pair_bonf);
+    end
+
+    function stats = corr_panel(ax, xRate, ySz, col, ttl, pBonfMult)
+        hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+        n = numel(xRate);
+        if n >= 3
+            [rho,p_raw] = corr(xRate, ySz, 'Type','Spearman','Rows','complete');
+            [~,lo,hi]   = bootstrap_spearman_ci(xRate, ySz, nBoot, alpha);
+        else
+            rho=NaN; p_raw=NaN; lo=NaN; hi=NaN;
+        end
+        p_bonf = min(p_raw*pBonfMult, 1);
+
+        lx = to_log10_per_month(ySz,  EPS_FREQ);   % x = seizures/month
+        ly = to_log10_per_hour (xRate, EPS_RATE);  % y = spikes/hour
+        scatter(ax, lx, ly, 26, col, 'filled', 'MarkerFaceAlpha',0.5);
+
+        nz = (xRate>0) & (ySz>0);
+        if nnz(nz) >= 3
+            b  = [ones(nnz(nz),1), to_log10_per_month(ySz(nz),EPS_FREQ)] \ ...
+                 to_log10_per_hour(xRate(nz),EPS_RATE);
+            xg = linspace(xl_corr(1), xl_corr(2), 100)';
+            plot(ax, xg, b(1)+b(2)*xg, '-', 'Color',col, 'LineWidth',2);
+        end
+
+        xlim(ax, xl_corr); ylim(ax, yl_corr);
+        set_log10_ticks(ax, 'x', EPS_FREQ, xl_corr);
+        set_log10_ticks(ax, 'y', EPS_RATE, yl_corr);
+        xlabel(ax, 'Seizures/month (log scale)', 'FontSize', FONT);
+        ylabel(ax, 'Spikes/hour (log scale)',    'FontSize', FONT);
+        title(ax, sprintf('%s (N=%d)', ttl, n), 'FontSize', FONT, 'FontWeight','bold');
+        if isfinite(rho)
+            text(ax, 0.97, 0.95, sprintf('\\rho=%.2f [%.2f-%.2f]\np_{bonf}%s', ...
+                rho, lo, hi, regexprep(char(p_label(p_bonf)),'^p','')), ...
+                'Units','normalized','HorizontalAlignment','right', ...
+                'VerticalAlignment','top','FontSize',FONT-4,'FontWeight','bold');
+        end
+        set(ax,'FontSize',FONT);
+        stats = struct('Group',"",'rho',rho,'p_raw',p_raw,'p_bonf',p_bonf,'ci',[lo hi],'N',n);
+    end
+end
+
+function [FigBias, BiasStats] = make_fig_report_bias(Views, SzFreqPerPatient, ...
+    EPS_RATE, EPS_FREQ, nBoot, alpha, outPath)
+% Compares EEGs WITH an available spike report (present/absent) vs those
+% WITHOUT (unknown). EEG (session) level.
+%   A: spike rate            (Wilcoxon rank-sum)
+%   B: seizure frequency     (patient mean assigned to each EEG; rank-sum)
+%   C: epilepsy type (Gen/Temporal/Frontal) 2x3 chi-square, drawn as a
+%      row-normalized confusion matrix
+if nargin < 3 || isempty(EPS_RATE), EPS_RATE = 30e-3; end
+if nargin < 4 || isempty(EPS_FREQ), EPS_FREQ = 1e-3;  end
+if nargin < 5 || isempty(nBoot),    nBoot    = 5000;  end
+if nargin < 6 || isempty(alpha),    alpha    = 0.05;  end
+if nargin < 7, outPath = ''; end
+
+FONT       = 18;
+grp_names  = ["Report available","No report"];
+ylab_short = ["Report avail.","No report"];
+canon3     = ["General","Temporal","Frontal"];
+
+%% --- Assemble EEG-level table: report status + spike rate + patient sz freq/type ---
+RS = resolve_reported_spike_status(Views.ReportForKeptSessions);   % Patient,Session,ReportStatus
+E  = innerjoin(RS, Views.SessionLevelSpikeRates(:,{'Patient','Session','SpikesPerHour'}), ...
+    'Keys', {'Patient','Session'});
+E  = innerjoin(E, SzFreqPerPatient(:,{'Patient','MeanSzFreq'}), 'Keys','Patient');
+E  = innerjoin(E, Views.PatientLevelSpikeRates(:,{'Patient','EpiType3'}), 'Keys','Patient');
+assert_unique_keys(E, "Patient", "Session", "report-bias EEG table");
+
+hasRep        = (E.ReportStatus=="present") | (E.ReportStatus=="absent");
+E.Grp         = categorical(repmat(grp_names(2),height(E),1), grp_names);
+E.Grp(hasRep) = grp_names(1);
+
+fprintf('[Report bias] %d EEGs with a report, %d without (of %d cohort EEGs)\n', ...
+    nnz(hasRep), nnz(~hasRep), height(E));
+
+FigBias = figure('Color','w','Position',[60 60 1550 520]);
+tiledlayout(FigBias, 1, 3, 'TileSpacing','compact','Padding','compact');
+
+%% --- Panel A: spike rate ---
+axA = nexttile(1);
+sA = ranksum_panel(axA, E.SpikesPerHour, E.Grp, EPS_RATE, @add_median_ci_overlay, ...
+    'Spikes/hour (log scale)', 'A. Spike rate');
+
+%% --- Panel B: seizure frequency ---
+axB = nexttile(2);
+sB = ranksum_panel(axB, E.MeanSzFreq, E.Grp, EPS_FREQ, @add_median_ci_overlay_month, ...
+    'Seizures/month (log scale)', 'B. Seizure frequency');
+
+%% --- Panel C: epilepsy type confusion matrix + 2x3 chi-square ---
+axC   = nexttile(3);
+typed = ismember(string(E.EpiType3), canon3) & ~ismissing(E.EpiType3);
+Et    = E(typed,:);
+O = zeros(2,3);
+for r = 1:2
+    for c = 1:3
+        O(r,c) = nnz(Et.Grp==grp_names(r) & string(Et.EpiType3)==canon3(c));
+    end
+end
+[chi2, p_chi2, df, Eexp] = chi2_contingency(O);
+rowProp = O ./ max(sum(O,2),1);   % row-normalized: type distribution within each group
+
+imagesc(axC, rowProp); hold(axC,'on');
+colormap(axC, flipud(gray)); clim(axC,[0 1]);
+for r = 1:2
+    for c = 1:3
+        txtcol = [0 0 0]; if rowProp(r,c) > 0.6, txtcol = [1 1 1]; end
+        text(axC, c, r, sprintf('%d\n(%.0f%%)', O(r,c), 100*rowProp(r,c)), ...
+            'HorizontalAlignment','center','VerticalAlignment','middle', ...
+            'FontSize',FONT-3,'Color',txtcol);
+    end
+end
+axC.XTick = 1:3; axC.XTickLabel = canon3;
+axC.YTick = 1:2; axC.YTickLabel = ylab_short;
+xlabel(axC,'Epilepsy type','FontSize',FONT);
+warnstr = ''; if any(Eexp(:) < 5), warnstr = ' (expected<5)'; end
+title(axC, sprintf('C. Epilepsy type\n\\chi^2(%d)=%.1f, %s%s', ...
+    df, chi2, char(p_label(p_chi2)), warnstr), 'FontSize',FONT,'FontWeight','bold');
+set(axC,'FontSize',FONT); box(axC,'on'); axis(axC,'tight');
+
+%% --- Save + bundle ---
+if strlength(string(outPath)) > 0
+    save_fig(FigBias, outPath);
+    fprintf('Saved report-bias figure: %s\n', outPath);
+end
+BiasStats.nWithReport = nnz(hasRep);
+BiasStats.nNoReport   = nnz(~hasRep);
+BiasStats.SpikeRate   = sA;
+BiasStats.SzFreq      = sB;
+BiasStats.EpiType     = struct('Counts',O,'Expected',Eexp,'chi2',chi2,'df',df, ...
+    'p',p_chi2,'RowLabels',grp_names,'ColLabels',canon3);
+
+%% ================= nested helper =================
+    function stats = ranksum_panel(ax, val, grp, epsFloor, ciFn, ylab, ttl)
+        hold(ax,'on'); box(ax,'off'); grid(ax,'on');
+        x1 = val(grp==grp_names(1)); x1 = x1(isfinite(x1));
+        x2 = val(grp==grp_names(2)); x2 = x2(isfinite(x2));
+        if ~isempty(x1) && ~isempty(x2)
+            p = ranksum(x1, x2, 'method','approx');
+            d = cliff_delta(x1, x2);
+        else
+            p = NaN; d = NaN;
+        end
+        Y  = to_log10_per_hour(val, epsFloor);   % generic log10 with eps floor
+        yz = log10(epsFloor);
+        yl = [min([yz; Y])-0.3, max(Y)+0.7];
+        Yj = add_y_jitter_eps(Y, yz, yl, 0.02);
+        boxchart(ax, grp, Yj, 'BoxFaceAlpha',0.25,'MarkerStyle','none');
+        swarmchart(ax, grp, Yj, 14, 'filled','MarkerFaceAlpha',0.20);
+        yline(ax, yz, ':', 'Color',[0.4 0.4 0.4],'LineWidth',1.2);
+        for k = 1:2
+            [m,lo,hi] = bootstrap_median_ci(val(grp==grp_names(k)), nBoot, alpha);
+            ciFn(ax, k, m, lo, hi, epsFloor);
+        end
+        ylim(ax, yl);
+        set_log10_ticks(ax, 'y', epsFloor, yl);
+        ylabel(ax, ylab, 'FontSize', FONT);
+        if isfinite(p), add_sigbar(ax, 1, 2, yl(2)-0.10*range(yl), p_label(p)); end
+        title(ax, ttl, 'FontSize', FONT, 'FontWeight','bold');
+        lbl = string(ax.XTickLabel);
+        for k = 1:2
+            lbl(lbl==grp_names(k)) = sprintf('%s (N=%d)', grp_names(k), nnz(grp==grp_names(k)));
+        end
+        ax.XTickLabel = lbl; ax.XTickLabelRotation = 15;
+        set(ax,'FontSize',FONT);
+        stats = struct('p_ranksum',p,'cliff_delta',d,'n1',numel(x1),'n2',numel(x2));
+    end
+end
+
+function [chi2, p, df, E] = chi2_contingency(O)
+% Pearson chi-square test of independence for contingency table O.
+rowSum = sum(O,2); colSum = sum(O,1); N = sum(O(:));
+E    = rowSum * colSum / N;                 % expected counts under independence
+chi2 = sum(((O - E).^2) ./ E, 'all');
+df   = (size(O,1)-1) * (size(O,2)-1);
+p    = 1 - chi2cdf(chi2, df);
+end
+
+function [SpearmanResults, rs_all, p_all, n_all, rho_lo, rho_hi, subtype_ci, trimInfo] = ...
+    spearman_trim_top_spikers(Views, canonical3, spearman_xLims, spearman_yLims, ...
+        fig_out, trimFrac, nonZeroOnly)
+% Sensitivity version of the Spearman figure with the top trimFrac of highest
+% spike-rate patients removed (reviewer check: is the association driven by
+% very-high-density patients?). Threshold is set on the primary all-epilepsy
+% cohort and applied consistently to both the All and subtype-typed tables.
+if nargin < 6 || isempty(trimFrac),    trimFrac    = 0.10; end
+if nargin < 7 || isempty(nonZeroOnly), nonZeroOnly = true; end   % matches Fig S1
+
+All   = Views.PatientSpikeSz_All;
+Typed = Views.PatientSpikeSz_Typed;
+
+% Cutoff from the all-epilepsy cohort; keep the bottom (1 - trimFrac)
+thr       = prctile(All.MeanSpikeRate_perHour, 100*(1-trimFrac));
+keepAll   = All.MeanSpikeRate_perHour   <= thr;
+keepTyped = Typed.MeanSpikeRate_perHour <= thr;
+
+fprintf(['[Trim top %.0f%%] Spike-rate cutoff = %.2f spikes/hour. ' ...
+    'Removed %d/%d all-epilepsy and %d/%d subtype-typed patients.\n'], ...
+    100*trimFrac, thr, nnz(~keepAll), height(All), nnz(~keepTyped), height(Typed));
+
+suffix = sprintf(' (top %.0f%% spikers removed)', 100*trimFrac);
+[SpearmanResults, rs_all, p_all, n_all, rho_lo, rho_hi, subtype_ci] = ...
+    spearman_plotting_function(All(keepAll,:), Typed(keepTyped,:), canonical3, ...
+        spearman_xLims, spearman_yLims, fig_out, 'MeanSzFreq', suffix, nonZeroOnly);
+
+trimInfo = struct('trimFrac',trimFrac,'threshold',thr, ...
+    'nRemovedAll',nnz(~keepAll),'nRemovedTyped',nnz(~keepTyped), ...
+    'nKeptAll',nnz(keepAll),'nKeptTyped',nnz(keepTyped));
 end
