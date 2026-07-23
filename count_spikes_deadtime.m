@@ -25,7 +25,7 @@ PATIENT_ID_OFFSET = 0;
 NEG_DEAD_TOL = 5;
 
 % Set to Inf for the full run, or e.g. 100 for a quick test pass.
-MAX_FILES     = 100;
+MAX_FILES     = Inf;
 PRINT_EVERY   = 100;   % progress update interval (files)
 
 %% ===== Load clinical durations =====
