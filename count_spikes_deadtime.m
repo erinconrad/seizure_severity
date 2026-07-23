@@ -24,6 +24,10 @@ PATIENT_ID_OFFSET = 0;
 % than rounding noise.
 NEG_DEAD_TOL = 5;
 
+% Set to Inf for the full run, or e.g. 100 for a quick test pass.
+MAX_FILES     = 100;
+PRINT_EVERY   = 100;   % progress update interval (files)
+
 %% ===== Load clinical durations =====
 assert(isfile(clinicalCsv), 'Clinical CSV not found: %s', clinicalCsv);
 C = readtable(clinicalCsv, 'TextType', 'string', 'VariableNamingRule', 'preserve');
@@ -61,6 +65,16 @@ filePaths = string(fullfile({filesAll.folder}, {filesAll.name}));
 [~, uniqIdx] = unique(filePaths, 'stable');
 files = filesAll(uniqIdx);
 
+nFound = numel(files);
+if isfinite(MAX_FILES) && nFound > MAX_FILES
+    files = files(1:MAX_FILES);
+    fprintf('TEST RUN: processing first %d of %d files (set MAX_FILES = Inf for all).\n', ...
+        numel(files), nFound);
+else
+    fprintf('Processing all %d files.\n', nFound);
+end
+nToDo = numel(files);
+
 %% ===== Schema =====
 varNames = {'EEG_Name', 'Patient', 'Session', ...
     'EDF_Duration_sec', 'Recorded_Duration_sec', 'Deadtime_sec', ...
@@ -72,7 +86,8 @@ Summary = table('Size', [0 numel(varNames)], ...
     'VariableTypes', varTypes, 'VariableNames', varNames);
 
 %% ===== Process each file =====
-for k = 1:numel(files)
+tStart = tic;
+for k = 1:nToDo
     fpath = fullfile(files(k).folder, files(k).name);
     fname = files(k).name;
 
@@ -146,6 +161,14 @@ for k = 1:numel(files)
     Summary = [Summary; {string(fname), patientNum, sessionNum, ...
         edf_dur, rec_dur, dead_sec, nDead, nRec, nTotal, ...
         rate_dead, rate_rec, flag}]; %#ok<AGROW>
+
+    if mod(k, PRINT_EVERY) == 0 || k == nToDo
+        elapsed = toc(tStart);
+        perFile = elapsed / k;
+        remain  = perFile * (nToDo - k);
+        fprintf('  [%d/%d] %.0f%% | elapsed %s | ~%s remaining | %.2f s/file\n', ...
+            k, nToDo, 100*k/nToDo, fmt_dur(elapsed), fmt_dur(remain), perFile);
+    end
 end
 
 %% ===== Sanity checks =====
@@ -164,6 +187,12 @@ fprintf('Median spike rate: dead %.2f/min vs recording %.2f/min\n', ...
 
 %% ===== Save =====
 Summary = sortrows(Summary, {'Patient', 'Session', 'EEG_Name'});
+
+% Don't let a test run clobber the full-run output
+if isfinite(MAX_FILES)
+    [p, n, e] = fileparts(outCsv);
+    outCsv = fullfile(p, sprintf('%s_first%d%s', n, MAX_FILES, e));
+end
 writetable(Summary, outCsv);
 fprintf('Saved to: %s  (rows=%d)\n', outCsv, height(Summary));
 
@@ -187,6 +216,24 @@ function detIdx = detect_spikes_wholefile(SN2, THRESHOLD, WIN_SAMP)
         end
     end
     detIdx = detIdx(1:nDet);
+end
+
+function s = fmt_dur(secs)
+% Compact h:mm:ss / m:ss formatting for progress messages.
+    if ~isfinite(secs)
+        s = '--';
+        return
+    end
+    h = floor(secs/3600);
+    m = floor(mod(secs, 3600)/60);
+    sec = floor(mod(secs, 60));
+    if h > 0
+        s = sprintf('%dh%02dm', h, m);
+    elseif m > 0
+        s = sprintf('%dm%02ds', m, sec);
+    else
+        s = sprintf('%ds', sec);
+    end
 end
 
 function secs = hms_to_seconds(x)
